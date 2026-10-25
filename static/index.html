@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f8f7f4">
+  <meta name="description" content="知序智能助手，与你一起梳理思路、探索知识、连接最新信息。">
+  <title>知序 · 智能助手</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 11.5a8 8 0 0 1-8 8 9 9 0 0 1-3.5-.7L4 20l1.2-4.5A9 9 0 0 1 4 11.5a8 8 0 0 1 16 0Z"/><path d="M8 10h8M8 14h5"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><ellipse cx="12" cy="12" rx="3.5" ry="8.5"/><path d="M4 9h16M4 15h16"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-arrow-up-right" viewBox="0 0 24 24"><path d="M6 18 18 6M6 6h12v12"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 14h10l1-14M10 10v6M14 10v6"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 5c-3-2-6-2-9-1v14c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v14"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h7M9 13h7M9 17h4M7 9h.01M7 13h.01M7 17h.01"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  </svg>
+
+  <div class="app-shell">
+    <button id="sidebar-backdrop" class="sidebar-backdrop" aria-label="关闭侧边栏" hidden></button>
+    <aside class="sidebar" id="sidebar" aria-label="对话导航">
+      <a class="brand" href="/" aria-label="知序首页">
+        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-spark"/></svg></span>
+        <span><strong>知序<span class="brand-dot">.</span></strong><small>让每个想法，更进一步</small></span>
+      </a>
+      <button id="new-chat" class="new-chat"><svg class="icon"><use href="#i-plus"/></svg><span>开启新对话</span><kbd>Ctrl K</kbd></button>
+
+      <div class="sidebar-section-title"><span>对话记录</span><span id="session-count">0</span></div>
+      <nav id="session-list" class="session-list" aria-label="历史对话"></nav>
+      <p id="empty-history" class="empty-history">从一个问题开始，<br>你的思路会留在这里。</p>
+
+      <div class="sidebar-bottom">
+        <a href="/docs" target="_blank" rel="noopener" class="docs-link"><svg class="icon"><use href="#i-book"/></svg><span>API 接口文档</span><svg class="icon small"><use href="#i-arrow-up-right"/></svg></a>
+        <div class="local-note"><span class="local-indicator"></span>会话记忆自动保存</div>
+        <div class="sidebar-signature"><span>ZHIXU</span><span>你的思考伙伴</span></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="topbar-title">
+          <button id="menu-toggle" class="icon-button mobile-menu" aria-label="打开对话导航" aria-expanded="false" aria-controls="sidebar"><svg class="icon"><use href="#i-menu"/></svg></button>
+          <span class="workspace-label">个人工作台</span><span class="breadcrumb-divider">/</span><span id="conversation-title">新对话</span>
+        </div>
+        <button id="connection" class="connection" title="点击检查服务连接"><span class="status-dot"></span><span id="connection-label">正在连接</span></button>
+      </header>
+
+      <div class="conversation-scroll" id="conversation-scroll">
+        <section class="welcome" id="welcome" aria-labelledby="welcome-title">
+          <div class="welcome-emblem" aria-hidden="true"><svg class="icon"><use href="#i-spark"/></svg><span class="emblem-orbit"></span></div>
+          <div class="eyebrow"><span></span>想法的下一站，从这里开始</div>
+          <h1 id="welcome-title">把问题交给我，<br>让思路<span class="accent-text">更清晰。</span></h1>
+          <p class="welcome-description">探索新知，梳理信息，或是寻找一个新的角度。<br>无论从哪里开始，我们一起想明白。</p>
+          <div class="suggestion-grid">
+            <button class="suggestion" data-prompt="请用通俗易懂的方式介绍大语言模型的工作原理，并举一个生活中的例子。">
+              <span class="suggestion-icon sage"><svg class="icon"><use href="#i-book"/></svg></span>
+              <strong>把复杂问题讲清楚</strong><span>用一个好懂的例子，理解新概念</span><svg class="icon suggestion-arrow"><use href="#i-arrow-up-right"/></svg>
+            </button>
+            <button class="suggestion" data-prompt="我想制定一份高效的每周工作计划，请给我一个可以直接使用的计划框架。">
+              <span class="suggestion-icon peach"><svg class="icon"><use href="#i-list"/></svg></span>
+              <strong>让工作更有条理</strong><span>拆解目标，找到下一步行动</span><svg class="icon suggestion-arrow"><use href="#i-arrow-up-right"/></svg>
+            </button>
+            <button class="suggestion" data-prompt="请搜索最近人工智能领域值得关注的动态，总结重点并附上来源链接。" data-search="true">
+              <span class="suggestion-icon lavender"><svg class="icon"><use href="#i-globe"/></svg></span>
+              <strong>看看世界的新动态</strong><span>连接网络，获取有来源的信息</span><svg class="icon suggestion-arrow"><use href="#i-arrow-up-right"/></svg>
+            </button>
+          </div>
+        </section>
+        <section id="messages" class="messages" aria-label="对话内容" aria-live="polite" aria-relevant="additions" hidden></section>
+      </div>
+
+      <div class="composer-dock">
+        <div id="error-banner" class="error-banner" role="alert" hidden><span id="error-text"></span><button id="retry" type="button">重试</button><button id="dismiss-error" class="icon-button" aria-label="关闭错误提示"><svg class="icon"><use href="#i-close"/></svg></button></div>
+        <form id="chat-form" class="composer">
+          <div id="attachments" class="attachments" aria-label="当前会话附件" aria-live="polite" hidden></div>
+          <input id="file-input" class="sr-only" type="file" accept=".txt,.md,.pdf,.docx" multiple tabindex="-1">
+          <label for="message" class="sr-only">向知序发送消息</label>
+          <div class="message-input-wrap">
+            <textarea id="message" rows="1" maxlength="8000" placeholder="有什么问题，尽管问我……" autocomplete="off"></textarea>
+            <button id="upload-file" class="upload-button" type="button" title="添加文件（TXT、MD、PDF、DOCX；每个文件最多 10 MB）" aria-label="添加文件"><svg class="icon"><use href="#i-plus"/></svg></button>
+          </div>
+          <div class="composer-toolbar">
+            <div class="composer-options">
+              <button id="web-search" class="search-toggle" type="button" aria-pressed="false" title="开启后先搜索网页，再参考结果回答"><svg class="icon"><use href="#i-globe"/></svg><span>联网搜索</span><span class="toggle-dot"></span></button>
+              <span class="composer-divider"></span><span id="composer-mode" class="composer-mode">从容思考，认真回答</span>
+            </div>
+            <div class="send-group"><span id="character-count" class="character-count" hidden></span><button id="send" type="submit" class="send-button" aria-label="发送消息" title="发送消息" disabled><svg class="icon"><use href="#i-arrow"/></svg></button></div>
+          </div>
+        </form>
+        <p id="upload-status" class="upload-status" role="status" hidden></p>
+        <div class="composer-footnote"><span>Enter 发送<span class="footnote-separator">·</span>Shift + Enter 换行</span><span id="context-note">好问题，值得认真回答。</span></div>
+      </div>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
