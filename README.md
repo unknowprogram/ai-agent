@@ -2,6 +2,8 @@
 
 基于 FastAPI 和 DeepSeek 的聊天服务，支持文件上传问答、MySQL 会话记忆、多轮上下文、Tavily 联网搜索和 API 文档。
 
+完整的项目结构、逐文件代码职责、技术栈、数据库与接口说明见 [开发文档](DEVELOPMENT.md)。
+
 ## 启动
 
 在项目根目录执行（Windows PowerShell）：
