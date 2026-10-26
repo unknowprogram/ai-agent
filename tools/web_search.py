@@ -9,6 +9,9 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
+from pydantic import Field
+
+from schemas.search import SearchRequest
 
 from core.exceptions import (
     SearchAuthenticationError, SearchConfigError, SearchError,
@@ -18,6 +21,24 @@ from core.exceptions import (
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+class SearchArguments(SearchRequest):
+    max_results: int = Field(default=5, ge=1, le=5, strict=True)
+
+
+SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "搜索互联网获取最新动态、实时信息、当前版本或需要核实的外部事实。"
+            "根据当前问题和对话历史生成明确的搜索词，优先查询官方来源。"
+            "普通概念解释、写作或已有文件资料足够时无需调用。"
+        ),
+        "parameters": SearchArguments.model_json_schema(),
+    },
+}
 
 
 def _search(query: str, max_results: int, api_key: str) -> list[dict[str, str]]:

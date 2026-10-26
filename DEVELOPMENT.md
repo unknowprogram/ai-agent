@@ -1,6 +1,6 @@
 # 企业智能助手开发文档
 
-本文基于 2026-10-25 项目代码整理，说明当前实现、每个源码文件的职责、技术选型、运行方式和扩展入口。页面品牌为“知序”，FastAPI 应用名称为“智能助手”。代码变更后，应同步更新本文对应章节。
+本文基于 2026-10-26 项目代码整理，说明当前实现、每个源码文件的职责、技术选型、运行方式和扩展入口。页面品牌为“知序”，FastAPI 应用名称为“智能助手”。代码变更后，应同步更新本文对应章节。
 
 ## 目录
 
@@ -23,7 +23,7 @@
 
 ## 1. 项目概览
 
-项目提供带网页界面的聊天服务。用户可以直接向模型提问，也可以上传文件，或开启联网搜索，让模型参考相关资料回答。
+项目提供带网页界面的聊天服务。用户可以直接向模型提问或上传文件，Agent 根据问题自主决定是否联网搜索并参考资料回答。
 
 当前能力：
 
@@ -33,13 +33,13 @@
 | 流式回答 | 后端返回 SSE，网页逐段追加模型正文 |
 | 多轮会话 | MySQL 持久化问答，后续通过 `conversation_id` 恢复最近历史 |
 | 会话管理 | 创建、列出、读取、删除会话 |
-| 文件问答 | 提取 TXT、MD、PDF、DOCX 文字，分块存储并做关键词检索 |
-| 联网搜索 | 用户开启开关后，通过 Tavily 搜索当前问题 |
+| 文件问答 | Agent 自主调用 search_documents 查询条款，或 summarize_document 扫描全部已提取文字并分段汇总 |
+| 联网搜索 | DeepSeek 自主生成 `web_search` 工具调用，后端执行 Tavily 并回传结果 |
 | 引用展示 | 网页显示搜索来源与实际进入上下文的文件片段 |
 | 输入与异常管理 | Pydantic 校验、统一业务异常、统一 HTTP 状态码 |
 | 开发调试 | FastAPI 自动生成 Swagger 和 OpenAPI |
 
-当前执行顺序由程序固定：读取记忆 → 检索文件 → 按需搜索 → 组装上下文 → 调用模型 → 保存问答。`agent/` 是模型与检索模块目录；项目尚未实现模型自主选择工具、反复执行工具的 Agent 循环，也没有单独处理或展示模型的 `reasoning_content`。
+当前执行顺序为：读取记忆 → 校验文件范围并提供清单 → 组装上下文 → 模型自主决定回答或调用工具 → 回传工具结果并继续调用模型 → 保存最终问答。`agent/runner.py` 开放 `web_search`、`search_documents` 与 `summarize_document`，共享最多 2 轮、合计 3 次调用的外层预算。摘要内部的分段读取、归纳和合并在一次工具调用中完成。未单独处理或展示模型的 `reasoning_content`。
 
 ## 2. 技术栈
 
@@ -79,8 +79,8 @@ ai-agent/
 ├── agent/
 │   ├── __init__.py
 │   ├── llm.py                 # 模型调用
-│   ├── prompts.py             # 系统提示词
-│   └── rag.py                 # 文件片段检索
+│   ├── runner.py              # 自主搜索工具循环
+│   └── prompts.py             # 系统提示词
 ├── core/
 │   ├── __init__.py
 │   ├── exceptions.py          # 业务异常定义
@@ -110,13 +110,14 @@ ai-agent/
 │   └── documents.py           # 文档与分块存储
 ├── tools/
 │   ├── __init__.py
-│   └── web_search.py          # Tavily REST 客户端
-├── static/
-│   ├── index.html             # 页面结构
-│   ├── styles.css             # 页面样式
-│   ├── app.js                 # 页面交互
-│   └── favicon.svg            # 网站图标
-└── skills/                    # 预留目录，当前未接入运行流程
+│   ├── web_search.py          # Tavily REST 客户端
+│   ├── document_summary.py    # 完整扫描与分段摘要工具
+│   └── documents.py           # 文档清单与片段检索工具
+└── static/
+    ├── index.html             # 页面结构
+    ├── styles.css             # 页面样式
+    ├── app.js                 # 页面交互
+    └── favicon.svg            # 网站图标
 ```
 
 `.venv/` 是依赖环境；`__pycache__/` 是 Python 缓存；`.idea/` 是编辑器配置；`.tmp/` 是临时文件目录；`.git/` 是版本库元数据。这些目录不承载项目业务逻辑。
@@ -158,11 +159,13 @@ flowchart TD
 | 文件 | 关键代码 | 职责与实现细节 |
 | --- | --- | --- |
 | [agent/__init__.py](agent/__init__.py) | 包初始化文件 | 标识 `agent` 包，不承担聊天业务 |
-| [agent/llm.py](agent/llm.py) | `LLMReply`、`_client_settings()`、`_usage_dict()`、`ask_llm()`、`stream_llm()` | 读取 DeepSeek 配置，封装返回结构和 Token 用量；普通调用返回完整结果，流式调用先产出正文字符串，最后产出 `LLMReply` |
+| [agent/llm.py](agent/llm.py) | `ToolCall`、`LLMReply`、`ask_llm()`、`stream_llm()` | 封装普通与流式模型请求、工具定义、工具调用及 Token 用量；流式累积工具名称和 JSON 参数片段 |
+| [agent/runner.py](agent/runner.py) | `TOOL_ARGUMENTS`、`AgentResult`、`run_agent()` | 选择当前可用的网页 / 文档工具，执行白名单和参数校验，限制次数，缓存本轮查询并回传结果 |
 | [agent/prompts.py](agent/prompts.py) | `SYSTEM_PROMPT` | 集中维护助手角色、处理任务、证据使用和输出要求；提示词描述能力不等于代码已经实现能力 |
-| [agent/rag.py](agent/rag.py) | `_tokens()`、`retrieve()`、`retrieve_documents()` | 合并文件范围、加载分块、按英文词与中文相邻双字评分，选取参考片段；概览或无匹配时按文件轮流取开头片段 |
+| [tools/documents.py](tools/documents.py) | `DOCUMENT_TOOL`、`DocumentSearchArguments`、`available_documents()`、`search_documents()`、`retrieve()` | 提供文件清单；只在 Agent 调用工具后加载指定范围的分块，按关键词与中文相邻双字评分并选取片段 |
+| [tools/document_summary.py](tools/document_summary.py) | `SUMMARY_TOOL`、`DocumentSummaryArguments`、`summarize_document()`、`SummaryResult` | 完整读取已提取正文，定位章节、分段归纳、逐级合并，返回覆盖统计、进度和内部模型用量 |
 
-`agent/llm.py` 每次调用使用异步上下文管理器创建和关闭客户端；请求超时设为 60 秒，最多重试一次，输出上限 `max_tokens=2048`。空正文会转换为 `LLMResponseError`。流式实现接收 `stop` 或 `length` 结束原因，并通过 `include_usage` 尝试读取用量；因此达到输出上限的回答也可能正常保存。代码只处理正文，不处理独立思考字段。
+`agent/llm.py` 每次调用使用异步上下文管理器创建和关闭客户端；默认超时 60 秒，最多重试一次，输出上限 `max_tokens=2048`。摘要分段归纳与中间合并提高到 4096，最终摘要及外层综合回答为 8192。摘要内部单次请求超时 180 秒，不自动重试网络错误，等待期间每 15 秒报告进度。`LLMReply` 保留 `finish_reason`。正文和工具调用同时为空会转换为 `LLMResponseError`。有效工具调用要求 `tool_calls` 结束原因；不完整或截断的工具参数不会执行。普通正文允许 `stop` 或 `length`；摘要分段及中间合并输出截断时缩小输入重试，最终回答截断则报错，不保存未完成的回答。工具循环累计外层及摘要内部各次调用的 Token 用量。当前适配默认的 `deepseek-chat`，未处理独立思考字段。
 
 ### 4.3 `core/`：异常与全局处理
 
@@ -181,7 +184,7 @@ flowchart TD
 | [router/__init__.py](router/__init__.py) | 包初始化文件 | 标识 `router` 包 |
 | [router/chat.py](router/chat.py) | `_chat_arguments()`、`create_chat()`、`_event()`、`create_chat_stream()` | 把 Pydantic 请求转换为服务层参数；普通聊天返回 `ChatResponse`；流式聊天先准备上下文，再返回 `StreamingResponse`；异常转为 SSE `error` 事件 |
 | [router/conversations.py](router/conversations.py) | 创建、列表、详情、删除四个处理函数 | 接收 UUID、分页数量与标题，调用 MySQL 存储；同步 `def` 路由由 FastAPI 放入线程池运行 |
-| [router/files.py](router/files.py) | `upload_file()`、`get_file()` | 接收字段名为 `file` 的上传；最多主动读取 10 MiB 加 1 字节以判断超限；无论成功失败都关闭 `UploadFile`；异步查询文件元数据 |
+| [router/files.py](router/files.py) | `upload_file()`、`get_file()` | 接收字段名为 `file` 的上传；最多主动读取 20 MiB 加 1 字节以判断超限；无论成功失败都关闭 `UploadFile`；异步查询文件元数据 |
 | [router/search.py](router/search.py) | `create_search()` | 提供独立搜索接口，直接返回 Tavily 结果，不调用语言模型 |
 
 **当前需要留意的实际配置：** `router/chat.py` 的 `_chat_arguments()` 仍为每个请求传入固定摘要“用户正在开发企业知识库 Agent，目前已完成聊天和联网搜索。”，以及中文、简洁回答的固定偏好。这些内容是示例上下文，并非从用户历史自动生成；`ChatRequest` 也没有开放 `summary` 或 `preferences` 字段。需要自定义时，从这里和服务层接口开始调整。
@@ -197,7 +200,7 @@ flowchart TD
 | [schemas/files.py](schemas/files.py) | `DocumentInfo`、`DocumentSource` | 定义上传解析信息及参考片段，包含文件名、片段编号、位置等 |
 | [schemas/search.py](schemas/search.py) | `SearchRequest`、`SearchResult`、`SearchResponse` | 校验搜索词和结果数量；定义标题、链接、摘要的返回结构 |
 
-聊天、历史消息、搜索和会话创建请求禁止额外字段。历史导入只允许 `user`、`assistant`；客户端不能通过该结构注入 `system` 消息。`web_search` 使用严格布尔值，搜索结果数量使用严格整数。
+聊天、历史消息、搜索和会话创建请求禁止额外字段。历史导入只允许 `user`、`assistant`；客户端不能通过该结构注入 `system` 消息。`web_search` 省略或为 `null` 时默认自主搜索，也接受严格布尔值：`true` 要求先搜索，`false` 禁止搜索。搜索结果数量使用严格整数。
 
 ### 4.6 `service/`：业务编排
 
@@ -209,7 +212,7 @@ flowchart TD
 | [service/files.py](service/files.py) | `_decode_text()`、`_read_pdf()`、`_read_docx()`、`_split_sections()`、`parse_file()`、`ingest_file()` | 校验文件类型与大小，解析文字，保留位置，切块并调用文档存储；耗时解析与同步 SQL 通过线程执行 |
 | [service/memory.py](service/memory.py) | `MemoryContext`、`load_context()`、`trim_context()`、`save_turn()` | 将异步聊天流程适配到同步 MySQL 操作，携带历史快照和最后消息 ID；提交整轮问答 |
 
-`PreparedChat` 保存模型输入、记忆快照、搜索来源、全部关联文件 ID 和本次保留的文件片段。`service/chat.py` 通过片段的 JSON 表达是否仍出现在最终当前消息中，筛选 `document_sources`。
+`PreparedChat` 保存初始模型输入、记忆快照、当前问题、摘要、偏好、搜索模式、关联文件 ID 和文件元数据清单，不预先检索正文。工具执行后重新按预算构建上下文；工具消息通过 `assistant.tool_calls` 和 `role=tool` 保留。`document_sources` 从最终模型输入的文档工具结果中提取，反映预算裁剪后实际保留的片段。
 
 `service/memory.py` 的 `trim_context()` 保留了旧的历史裁剪工具，但当前聊天主流程实际调用的是 `service/context.py` 的 `build_context()`。调整主要上下文策略应修改后者。
 
@@ -224,6 +227,7 @@ flowchart TD
 | 同上 | `list_conversations()`、`get_conversation()`、`delete_conversation()` | 会话列表、详情与删除；删除时先删除消息，再删除会话 |
 | 同上 | `initialize_schema()`、命令行 `--init` | 从根目录读取 `agent_db.sql`，执行缺失表初始化 |
 | [storage/documents.py](storage/documents.py) | `save_document()`、`get_document()` | 原子保存文档元数据与分块；读取时计算分块数、首块预览并解码 JSON 警告 |
+| 同上 | `get_document_metadata()` | 按已校验的文件 ID 查询文件名、类型和文字数量，不读取分块正文 |
 | 同上 | `resolve_document_ids()`、`list_conversation_documents()`、`get_document_chunks()` | 合并请求文件与会话已绑定文件，去重、校验存在和数量，查询关联信息及分块 |
 
 数据库采用 `DictCursor` 和 `utf8mb4`；连接、读、写超时分别为 5、10、10 秒，`autocommit=False`。每次存储操作独立创建和关闭连接，目前没有连接池。SQL 值使用参数传递；动态 `IN` 条件只拼接占位符。
@@ -244,7 +248,7 @@ flowchart TD
 | [static/index.html](static/index.html) | 侧栏、欢迎区、消息区、聊天表单、文件输入、图标符号 | 定义页面 DOM、无障碍标签及操作入口；上传由输入框内部的 `+` 按钮触发隐藏文件选择框 |
 | [static/styles.css](static/styles.css) | 布局、消息、输入框、附件、引用、响应式规则 | 暖色浅色页面；适配桌面和手机；处理流式光标、侧栏、代码块、减少动态效果偏好等 |
 | [static/app.js](static/app.js) | `state`、`restore()`、`persist()`、`loadSession()`、`syncConversations()` | 管理当前会话、缓存与服务端同步，恢复服务端 ID 和附件绑定 |
-| 同上 | `uploadFiles()`、`renderAttachments()`、`stagedFiles()` | 上传文件、显示待发送附件、移除本轮选择；已绑定附件内部保留但不显示卡片 |
+| 同上 | `uploadFiles()`、输入框 `paste` 事件、`renderAttachments()`、`stagedFiles()` | 文件选择和剪贴板文件共用上传流程，保留待发送队列，校验上传状态；已发送文件在其问题气泡中显示 |
 | 同上 | `submit()`、`readEvents()`、`contextFor()` | 清空输入、发起流式请求、解析事件、逐段显示回答；兼容旧浏览器会话历史导入 |
 | 同上 | `markdown()`、`inline()`、`messageView()`、`renderSources()`、`safeURL()` | 构建消息、基础 Markdown 和引用 DOM；检查链接协议，避免把模型正文当原始 HTML 插入 |
 | 同上 | `updateInput()`、`startNew()`、`checkConnection()`、`copy()`、`showError()` | 输入状态、新建会话、存活检查、复制、错误与重试交互 |
@@ -289,7 +293,7 @@ MYSQL_DATABASE=agent_db
 | `DEEPSEEK_API_KEY` | 无默认值；调用模型必填 |
 | `DEEPSEEK_BASE_URL` | 默认 `https://api.deepseek.com` |
 | `DEEPSEEK_MODEL` | 默认 `deepseek-chat` |
-| `TAVILY_API_KEY` | 无默认值；只有搜索接口或开启联网搜索时需要 |
+| `TAVILY_API_KEY` | 无默认值；独立搜索接口或 Agent 实际调用网页工具时需要 |
 | `MYSQL_HOST` | 默认 `127.0.0.1` |
 | `MYSQL_PORT` | 默认 `3306`，必须为 1–65535 的整数 |
 | `MYSQL_USER` | 默认 `agent_user` |
@@ -422,18 +426,20 @@ sequenceDiagram
     participant R as router/chat.py
     participant S as service/chat.py
     participant DB as MySQL
-    participant T as Tavily
+    participant T as tools 网页或文档检索
     participant L as DeepSeek
     U->>R: POST /api/chat
     R->>S: chat(校验后的参数)
-    S->>DB: 读取历史快照、文件及分块
-    opt web_search = true
-        S->>T: 搜索当前问题
-        T-->>S: 网页摘要
+    S->>DB: 读取历史快照、校验文件范围和元数据
+    Note over S: 提供文件清单并按预算构建 messages
+    S->>L: ask_llm(messages, tools, tool_choice=auto)
+    loop 模型需要外部资料且未达到调用上限
+        L-->>S: tool_calls(web_search / search_documents / summarize_document)
+        S->>T: 校验参数、文件范围并执行 query
+        T-->>S: 网页摘要 / 文档片段 / 分段汇总与覆盖统计
+        S->>L: assistant.tool_calls + role=tool 结果
     end
-    Note over S: 检索片段并按预算构建 messages
-    S->>L: ask_llm(messages)
-    L-->>S: LLMReply
+    L-->>S: 最终 LLMReply
     S->>DB: 事务保存完整问答与文件关联
     DB-->>S: conversation_id
     S-->>R: ChatResult
@@ -444,13 +450,13 @@ sequenceDiagram
 
 ### 7.2 流式聊天
 
-`POST /api/chat/stream` 和普通聊天使用相同的请求结构。路由先完成记忆读取、检索、搜索和上下文构建；这些步骤失败时仍可以返回正常 HTTP 错误状态。
+`POST /api/chat/stream` 和普通聊天使用相同的请求结构。路由先完成记忆读取、文件范围校验、元数据查询和初始上下文构建；这些步骤失败时仍可返回 HTTP 错误状态。网页与文档检索均在 Agent 循环中执行，流内错误通过 `error` 事件返回。
 
 开始流式响应后：
 
-1. `sources`：发送网页来源和实际保留的文件参考片段。
-2. `delta`：逐段发送模型正文。
-3. 收到模型完成结果后，提交完整问答和文件关联。
+1. 首次 `sources` 发送空网页与文档来源，以及 `searched=false`。
+2. `delta` 逐段发送模型正文；模型调用工具时，`tool_start` 的 `reset=true` 清除中间说明，后续事件按工具名称显示查询范围。摘要用 `tool_progress` 发送定位、读取、归纳和合并进度。工具成功后更新来源与 `document_summaries`；`searched` 只标记实际执行过联网搜索。
+3. 收到最终模型回答后，提交原始问题、最终回答和文件关联；中间说明与工具消息不写入会话历史。
 4. 提交成功才发送 `done`，内容为完整 `ChatResponse`。
 5. 生成或保存出错时发送 `error`，包含逻辑状态码和错误提示。
 
@@ -477,15 +483,15 @@ SSE 本身是单向事件流，本项目使用 `fetch` 发起 POST 并读取响�
 | 单条问题 / 导入历史文本长度 | 去除首尾空白后 1–8000 字符 | `schemas/chat.py` |
 | 请求携带历史条数 | 最多 40 条 | `schemas/chat.py` |
 | 请求问题与历史合计 | 最多 60000 字符 | `ChatRequest.validate_context()` |
-| 实际模型输入正文总预算 | 6000 字符 | `service/context.py: MAX_INPUT_CHARS` |
+| 实际模型输入正文总预算 | 普通问答 6000 字符；摘要工具完成后 24000 字符 | `MAX_INPUT_CHARS`、`SUMMARY_CONTEXT_CHARS` |
 | 最多保留的历史消息 | 20 条，且需完整轮次和预算允许 | `MAX_HISTORY_MESSAGES` |
 | 摘要 | 初始最多 3000 字符 | `MAX_SUMMARY_CHARS` |
 | 网页参考 | 初始最多 5 条，每条摘要最多 2000 字符，标题最多 200 字符 | `_prepare_references()` |
 | 用户偏好 | 最多 5 项；键最多 40、值最多 300 字符 | `build_context()` |
 
-60000 是 API 接收上限；6000 是当前上下文构建的预算。它们含义不同。实际输入预算只累计消息 `content` 的 Python 字符数，**不是模型 Token 数**，也不包含协议包装的全部开销。
+60000 是 API 接收上限；6000 / 24000 是普通问答 / 摘要综合回答的上下文预算。基础消息累计 `content` 字符数，工具消息累计 JSON 字符数；该预算不是模型 Token 数，也不包含工具定义及协议的全部开销。
 
-因此，一条不足 8000 字符、通过 Pydantic 的问题，仍可能因加上系统提示超过 6000 字符而返回 400。
+工具循环还将工具调用与结果消息的 JSON 字符数计入预算。超预算时先裁剪历史与附加资料，再压缩工具摘要；保留完整的工具 ID 配对及合法 JSON。因此，一条不足 8000 字符、通过 Pydantic 的问题，仍可能因系统提示与工具消息超过预算而返回 400。
 
 ### 8.3 组装顺序与裁剪策略
 
@@ -494,10 +500,12 @@ SSE 本身是单向事件流，本项目使用 `fetch` 发起 POST 并读取响�
 ```text
 system：系统提示词 + 本次能力说明 + 参考资料使用约束
 user / assistant：最近能放下的完整历史轮次
-user：当前问题 + JSON 形式的摘要、偏好、网页结果、文件片段
+user：当前问题 + JSON 形式的摘要、偏好
+assistant：tool_calls（仅本轮实际模型工具调用）
+tool：网页摘要或文档片段（仅实际执行结果）
 ```
 
-`build_context()` 先确认“系统提示 + 原始问题”可以放下，再构造当前用户消息。若资料超预算，依次移除较后的网页结果、文件片段，随后反复减半摘要，最后移除偏好项。仍然超限则返回上下文错误。
+`build_context()` 在系统提示中提供已校验的文件清单，将真实工具调用与结果保留在独立消息中，并计入预算。预算不足时压缩摘要、偏好和历史，再由 Agent 压缩工具结果的正文片段，保留 ID 配对和合法 JSON。仍超限则返回上下文错误。
 
 剩余空间用于历史：从最新完整轮次往前选择；遇到条数或字符预算不足就停止，不拆开一轮问答，再恢复正序。
 
@@ -541,14 +549,14 @@ flowchart LR
 
 | 项目 | 当前限制 |
 | --- | --- |
-| 单文件上传 | 10 MiB，即 `10 * 1024 * 1024` 字节 |
-| PDF 页数 | 200 页 |
-| 提取正文 | 200000 字符 |
-| 分块数量 | 400 块 |
+| 单文件上传 | 20 MiB，即 `20 * 1024 * 1024` 字节，前后端一致 |
+| PDF 页数 | 500 页 |
+| 提取正文 | 500000 字符 |
+| 分块数量 | 800 块 |
 | 分块大小 | 约 1000 字符，优先在块后半段的换行处切分 |
 | 相邻块重叠 | 150 字符 |
 | DOCX ZIP 条目 | 最多 2000 个 |
-| DOCX 声明的解压总大小 | 最多 50 MiB |
+| DOCX 声明的解压总大小 | 最多 100 MiB |
 | 每会话文件 | 请求文件与已绑定文件合并去重后最多 5 个 |
 | 文件名 | 去除路径信息，最多保留 255 字符并尽量保留扩展名 |
 
@@ -556,7 +564,9 @@ flowchart LR
 
 ### 9.4 检索算法
 
-`agent/rag.py` 是轻量词法检索：
+`tools/documents.py` 定义文档检索工具。准备阶段由 `available_documents()` 校验文件范围并读取元数据；模型调用 `search_documents` 后才读取正文分块。`query` 为 1–400 字符，`limit` 为 1–4；可选 `file_id` 必须属于当前会话文件清单，省略则检索全部可用文件。模型不能扩大服务端提供的文件范围。
+
+工具使用轻量词法检索：
 
 1. 英文、数字、下划线按词提取并转小写。
 2. 连续中文拆成相邻双字，例如“知识库”得到“知识”“识库”。
@@ -564,11 +574,26 @@ flowchart LR
 4. 一般问题按分数选择最多 4 块；概览 / 总结问题或完全无匹配时，按文件轮流选择开头块。
 5. 每块正文只保留前 700 字符，进入整体上下文预算后还可能被剔除。
 
-这不是向量语义检索，也不是完整标准 BM25。当前会读取所选文件的全部分块再在内存评分。命中内容若出现在块的后部，截取前 700 字符可能丢失相关句子；大文件的“总结”也只覆盖少量片段，不能当作全文总结。
+这不是向量语义检索，也不是完整标准 BM25。当前会读取所选文件的全部分块再在内存评分。命中内容若出现在块的后部，截取前 700 字符可能丢失相关句子。此工具的概览回退只覆盖少量片段；全文、章节和广泛主题总结应由 Agent 选择 `summarize_document`。
 
 返回的 `document_sources` 表示本次实际进入模型上下文的片段，包含 `file_id`、`filename`、`chunk_index`、`location`、`content`。它不证明模型逐项引用或核实过所有片段。
 
-### 9.5 文件存储与生命周期
+### 9.5 完整范围摘要
+
+`tools/document_summary.py` 提供 `summarize_document(file_id, query)`，文件 ID 必须属于服务端校验后的会话清单；查询范围为 1–400 字符。系统提示要求全文、章节和「员工部分」等广泛主题总结优先使用此工具。
+
+1. 定位相关章节：读取文件元数据、解析提示及全部非空分块，识别标题和位置；标题仅辅助定位，不过滤正文。
+2. 分段读取：把每块完整正文分配到约 12000 个 JSON 字符以内的批次，超长块保留偏移并拆分；不截取前 700 字。
+3. 分段总结：逐批调用模型归纳指定范围的主题、关键条件、金额、期限和例外。分段和中间合并启用模型 JSON 输出模式，后端继续校验结构和来源编号。分段输出最多 4096 Token，截断时丢弃不完整结果，把当前输入分成更小批次重试；保留所有文字及偏移，不跳过当前批次。
+4. 合并汇总：所有分段结果参与逐级归纳，合并重复主题。中间合并最多 4096 Token，截断时缩小当前摘要分组重试，不能丢弃整组要点；最终摘要及外层综合回答提高到 8192 Token，避免密集制度条款的回答被截断。
+
+一次摘要工具执行包含全部内部模型调用，不受外层 2 轮 / 3 次预算逐段截断；同文件同范围的重复调用复用本轮结果。内部用量累计到本轮 `usage`，包括截断后重试的请求。最多 128 个最终读取批次、256 次读取尝试、256 次中间合并尝试和 8 层合并；不能继续拆分、最终输出截断、格式异常或超出处理上限会报错，不返回虚假的成功覆盖统计。取消或断开时关闭生成器，停止后续批次。
+
+JSON 与 SSE 完成响应均包含 `document_summaries`，每项有 `file_id`、`filename`、`query`、`summary`、`sections` 和 `coverage`。覆盖统计包含 `total_chunks`、`processed_chunks`、`total_batches`、`processed_batches`、`all_extracted_text_scanned`、起止位置、相关片段 / 主题数和解析提示。页面显示进度及覆盖范围，少量「摘要引用片段」只作为证据样例；浏览器缓存展示元数据，数据库仍只存最终问答。
+
+完整扫描只保证所有已提取正文被送入分段处理，不含未识别的扫描图片，也不保证模型语义归纳没有遗漏。OCR、精确事实覆盖评估及更细致的长摘要仍可后续扩展。
+
+### 9.6 文件存储与生命周期
 
 长期保存的是提取后的文字、分块和元数据，原始上传文件不会长期落盘归档。当前没有文件下载、删除、解绑接口或无引用文档清理任务。移除待发送附件只是取消本轮选择，不会删除已经上传的文档记录。
 
@@ -581,16 +606,16 @@ flowchart LR
 | 搜索深度 | `basic` |
 | 独立搜索词长度 | 去除首尾空白后 1–400 字符 |
 | 独立搜索结果数量 | 默认 5，范围 1–10 |
-| 聊天使用的搜索词 | 当前问题前 400 字符，不自动结合历史改写 |
-| 聊天结果数量 | 最多 5 条 |
-| 返回单条摘要 | 最多 3000 字符，进入上下文时进一步限制为 2000 |
+| 聊天使用的搜索词 | 模型结合当前问题、保留的历史和服务日期自主生成，1–400 字符 |
+| 聊天结果数量 | 每次最多 5 条；最多 2 轮、合计 3 次调用，来源按 URL 去重 |
+| 返回单条摘要 | 最多 3000 字符；工具结果先限制为 1000 字符，预算不足时进一步压缩 |
 | 请求超时 | 15 秒 |
 | 最大响应读取 | 2 MiB，超出报错 |
 | Tavily 参数 | `include_answer=false`、`include_raw_content=false` |
 
 结果必须包含可用的 HTTP / HTTPS URL；程序提取 `title`、`url`、`content`。401 / 403 转换为认证错误，429 / 432 / 433 转换为额度或限流错误，408 / 504 转换为超时。
 
-不开启联网时不要求 Tavily 密钥。开启后搜索失败会返回错误，不会静默假装已经搜索成功。`sources` 是本次检索结果，可能多于最终上下文实际保留的网页资料，也不代表模型引用了每一条结果。
+未调用搜索时不要求 Tavily 密钥；调用搜索需配置 `TAVILY_API_KEY`。搜索执行失败返回错误，不会伪造搜索成功。`sources` 是本轮实际检索结果，可能多于压缩后进入上下文的网页资料，也不代表模型引用了每一条结果。`searched` 标记是否实际执行过搜索，空结果也为 `true`。
 
 ## 11. API 接口说明
 
@@ -659,7 +684,7 @@ Content-Type: application/json
 }
 ```
 
-开启搜索时增加 `"web_search": true`；首次使用文件时增加上传接口返回的 `file_ids`。请求体不能包含 `summary`、`preferences` 等未声明字段。
+默认省略 `web_search` 让 Agent 自主判断；`true` 强制首次调用搜索工具，`false` 禁止调用。首次使用文件时增加上传接口返回的 `file_ids`。请求体不能包含 `summary`、`preferences` 等未声明字段。
 
 ### 11.3 SSE 格式
 
@@ -773,15 +798,15 @@ Content-Type: application/json
 
 ### 12.1 页面与交互
 
-前端为原生单页面交互，通过同源相对路径访问 API。页面包括会话侧栏、欢迎建议、消息列表、输入框、联网开关、上传入口、发送 / 停止按钮、错误提示和引用卡片。
+前端为原生单页面交互，通过同源相对路径访问 API。页面包括会话侧栏、欢迎建议、消息列表、输入框、文件选择与粘贴入口、发送 / 停止按钮、错误提示和引用卡片。
 
-输入框内的 `+` 按钮触发隐藏文件输入，没有单独前端上传页面。响应式样式包含 1150、768、380 像素附近的布局调整，手机端侧栏使用遮罩开关。
+输入框内的 `+` 按钮触发隐藏文件输入；`paste` 事件先读取 `clipboardData.files`，没有文件时再读取 `items` 中的文件项。文件粘贴阻止默认文本插入并共用 `uploadFiles()`；普通文字粘贴保持浏览器默认行为。忙碌状态会提示稍后粘贴。格式、大小和数量限制与选择文件一致。
 
 发送时输入框立即清空。失败后的问题单独保存在重试状态，不会自动重新填回输入框。Enter 发送、Shift + Enter 换行；Ctrl / Cmd + K 新建会话，手机侧栏可通过遮罩或 Escape 关闭。
 
 ### 12.2 会话与附件状态
 
-`state` 管理会话、当前 ID、搜索开关、进行中的请求、加载、预览、上传和新会话附件。需要区分三个 ID / 数据概念：
+`state` 管理会话、当前 ID、进行中的请求、加载、预览、上传和新会话附件。页面没有搜索按钮或搜索模式提示，请求不传 `web_search`；是否显示已联网标记由服务端 `searched` 决定。需要区分三个 ID / 数据概念：
 
 | 状态 | 含义 |
 | --- | --- |
@@ -791,6 +816,10 @@ Content-Type: application/json
 | 会话 `files` | 服务端已经绑定的附件，继续用于检索但不展示“已关联”卡片 |
 
 上传成功只代表文件已经解析入库；聊天成功才把待发送附件转为会话绑定文件。请求失败时可以保留待发送文件重试。
+
+首次提交随问题发送待发送队列的文件 ID；上传未完成、响应缺少有效 ID 或有失败附件时阻止发送。服务端将本轮文件名与 ID 写入当前用户问题的「本条问题附带的文件」，便于 Agent 区分新附件与历史绑定文件。用户问题气泡和中断预览保留对应文件卡片，后续追问只携带会话 ID。
+
+每条用户消息的附件展示信息保存在浏览器缓存。恢复数据库历史时按消息角色、正文和出现顺序合并缓存，避免相同文本的问题错配附件；数据库仍保存会话级文件绑定。
 
 ### 12.3 流解析与渲染
 
@@ -809,7 +838,7 @@ Markdown 渲染器支持常用标题、列表、引用、表格、代码块和�
 | 消息显示 | 服务端详情默认最近 80 条；恢复本地缓存时保留最近 80 条 |
 | 普通 JSON 请求 | 浏览器超时 20 秒 |
 | 文件上传 | 浏览器超时 90 秒 |
-| 流式聊天 | 浏览器整体超时 150 秒 |
+| 流式聊天 | 连续 180 秒没有 SSE 事件时超时；收到进度、正文等事件后重新计时 |
 | `/health` 检查 | 浏览器超时 5 秒 |
 
 MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模型、来源等展示信息。清理浏览器缓存后，已入库消息仍可恢复，但部分额外元数据可能丢失。
@@ -846,8 +875,6 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 
 ## 14. 手动验证与排查
 
-项目按当前使用方式通过 Swagger 和网页手动验证，不包含自动化测试目录。修改功能后，可按下面顺序检查。
-
 ### 14.1 Swagger 与网页验证清单
 
 | 检查项 | 操作 | 预期 |
@@ -858,7 +885,7 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 | 会话隔离 | 新会话询问另一个会话刚提供的信息 | 请求上下文不会自动包含另一会话历史 |
 | 会话管理 | 创建、列出、读取、删除后再读取 | 创建 201、删除 204、删除后读取 404 |
 | 输入校验 | 空白问题、非法 UUID、额外字段、ID 与非空历史同时传入 | 返回 422 |
-| 搜索 | 先独立调用 `/api/search`，再聊天开启搜索 | 返回搜索结果并显示来源 |
+| 搜索 | 先独立调用 `/api/search`，再直接询问最新信息 | Agent 自主调用搜索，返回结果并显示来源；普通概念解释可直接回答 |
 | 文件解析 | 分别上传 TXT、MD、文字 PDF、含表格 DOCX | 返回解析信息、片段数和预览 |
 | 文件问答 | 上传后带 `file_ids` 提问，再仅用会话 ID 追问 | 可继续使用绑定文件 |
 | 无效文件 | 空文件、损坏 PDF、不支持后缀、超过限制 | 返回对应 400 / 413 / 415 |
@@ -880,10 +907,10 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 | 初始化后旧表字段没有变化 | `CREATE TABLE IF NOT EXISTS` 不修改旧表，需要单独迁移 |
 | 502 模型认证错误 | DeepSeek 密钥是否有效，是否被系统环境变量中的旧值覆盖 |
 | 429 | 模型或 Tavily 额度、速率限制 |
-| 504 | 网络、代理、上游耗时；模型 60 秒与搜索 15 秒超时配置 |
-| 通过输入校验却返回 400 上下文过长 | 6000 字符实际预算还包含系统消息，和 8000 / 60000 API 上限不同 |
+| 504 | 网络、代理、上游耗时；模型默认 60 秒、摘要内部 180 秒、搜索 15 秒超时配置 |
+| 通过输入校验却返回 400 上下文过长 | 普通 6000 / 摘要 24000 字符预算还包含系统与工具消息，和 8000 / 60000 API 上限不同 |
 | 文件上传成功但回答找不到内容 | 问题词是否匹配、目标页是否有文字、检索片段是否截断或被预算剔除 |
-| 大文件总结不完整 | 当前只选最多 4 个片段，尚未做全文分段汇总 |
+| 大文件总结不完整 | 确认 Agent 调用了 summarize_document，检查覆盖统计、解析提示与原文；search_documents 仅提供少量片段 |
 | 流式回答最后一次性出现 | 使用的是否为 `/api/chat/stream`；代理或 HTTP 客户端是否缓冲 SSE |
 | 已看到回答但最后报错 | 可能是模型流结束异常、数据库提交失败或并发冲突；没有 `done` 就不能认定保存成功 |
 | 刷新后来源信息减少 | 来源和用量没有随每轮消息完整保存到数据库 |
@@ -894,14 +921,14 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 | --- | --- | --- |
 | 修改角色和回答风格 | `agent/prompts.py`；`router/chat.py` 固定偏好 | 能力描述应与实际工具一致 |
 | 替换默认模型 | `.env` 的 `DEEPSEEK_MODEL` / `DEEPSEEK_BASE_URL` | 新模型需兼容当前 Chat Completions 和流式 usage；不同思考字段需要额外适配 |
-| 调整输出长度、超时、重试 | `agent/llm.py` | 同步考虑前端 150 秒整体超时 |
+| 调整输出长度、超时、重试 | `agent/llm.py` | 同步考虑摘要内部请求、处理上限与前端 180 秒无事件超时 |
 | 调整历史和上下文 | `service/context.py`；`storage/mysql.py: load_memory()` | 区分读取数量、选择数量、字符预算与真实 Token 预算 |
 | 自动摘要 / 长期偏好 | 新增持久化结构和记忆服务，接入 `prepare_chat()` | 替换路由硬编码数据；设计摘要更新时机、失败处理和会话归属 |
 | 新增文件格式 | `service/files.py`、`router/files.py`、`static/index.html`、`static/app.js` | 后端后缀、解析器、前端 accept 与校验、依赖、异常、文档一并更新 |
-| 优化检索 | `agent/rag.py`；必要时扩展 `storage/documents.py` | 可加入更好的分词、BM25、向量、重排；需要索引更新和已有文档重建方案 |
-| 全文总结 | 在文件服务和聊天编排中新增分段汇总 | 当前概览只抽取开头片段，应规划分段 → 汇总与预算 |
+| 优化检索 | `tools/documents.py`；必要时扩展 `storage/documents.py` | 可加入更好的分词、BM25、向量、重排；需要索引更新和已有文档重建方案 |
+| 全文总结 | `tools/document_summary.py`、`agent/runner.py`、`service/chat.py` | 已实现完整正文扫描 → 分段归纳 → 逐级合并；调整批次和预算时验证尾部覆盖与异常处理 |
 | 新增搜索参数 | `schemas/search.py`、`tools/web_search.py`、`service/chat.py` | 聊天搜索和独立搜索需共同考虑 |
-| 新增工具或 Agent 循环 | `service/chat.py`、`agent/llm.py` 和新工具模块 | 需要实现工具协议、调度、迭代上限和结果回传，不能只加提示词 |
+| 新增 Agent 工具 | `agent/runner.py`、`agent/llm.py` 和新工具模块 | 增加工具定义、参数校验和白名单分发，保留迭代上限和结果回传 |
 | 新增 HTTP 接口 | `schemas/` → `service/` / `storage/` → `router/` → `main.py` | 复用异常映射和接口模型 |
 | 修改错误提示或状态码 | `core/exception_handlers.py` | 保持普通响应、Swagger、SSE 错误一致 |
 | 修改表结构 | `agent_db.sql` 加上实际迁移步骤 | 更新初始化文件不能自动升级已经存在的表 |
@@ -915,10 +942,10 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 
 | 范围 | 当前限制 | 后续方向 |
 | --- | --- | --- |
-| Agent | 固定流程，未实现自主工具调用循环或独立思考展示 | 明确工具协议、决策与执行循环，单独适配需要的模型能力 |
+| Agent | 已有自主网页与文档工具循环；未处理独立思考字段 | 扩展工具注册、权限与执行协议，按模型适配思考字段 |
 | 记忆 | 最近历史窗口，固定示例摘要和偏好 | 自动摘要、事实记忆、用户设置持久化 |
 | 上下文 | 字符预算，非 Token 感知 | 根据模型 Token 估算分配预算，并验证输出预留 |
-| 文件理解 | 文字提取与词法检索，片段范围有限 | OCR、向量检索、重排、全文汇总 |
+| 文件理解 | 文字提取、词法检索及全部已提取文字的分段汇总 | OCR、向量检索、重排、摘要事实覆盖评估 |
 | 文件管理 | 原文件不归档，无删除 / 解绑 / 清理接口 | 生命周期、原件存储、配额与清理任务 |
 | 数据库 | 每操作建立连接，无连接池 | 根据并发量引入连接池和监控 |
 | 用户隔离 | 没有登录、用户表或资源归属鉴权 | 用户认证，以及会话、文件访问授权 |

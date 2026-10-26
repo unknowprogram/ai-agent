@@ -73,7 +73,7 @@
               <span class="suggestion-icon peach"><svg class="icon"><use href="#i-list"/></svg></span>
               <strong>让工作更有条理</strong><span>拆解目标，找到下一步行动</span><svg class="icon suggestion-arrow"><use href="#i-arrow-up-right"/></svg>
             </button>
-            <button class="suggestion" data-prompt="请搜索最近人工智能领域值得关注的动态，总结重点并附上来源链接。" data-search="true">
+            <button class="suggestion" data-prompt="请搜索最近人工智能领域值得关注的动态，总结重点并附上来源链接。">
               <span class="suggestion-icon lavender"><svg class="icon"><use href="#i-globe"/></svg></span>
               <strong>看看世界的新动态</strong><span>连接网络，获取有来源的信息</span><svg class="icon suggestion-arrow"><use href="#i-arrow-up-right"/></svg>
             </button>
@@ -89,19 +89,19 @@
           <input id="file-input" class="sr-only" type="file" accept=".txt,.md,.pdf,.docx" multiple tabindex="-1">
           <label for="message" class="sr-only">向知序发送消息</label>
           <div class="message-input-wrap">
-            <textarea id="message" rows="1" maxlength="8000" placeholder="有什么问题，尽管问我……" autocomplete="off"></textarea>
-            <button id="upload-file" class="upload-button" type="button" title="添加文件（TXT、MD、PDF、DOCX；每个文件最多 10 MB）" aria-label="添加文件"><svg class="icon"><use href="#i-plus"/></svg></button>
+            <textarea id="message" rows="1" maxlength="8000" placeholder="输入问题，也可以在这里粘贴文件……" aria-describedby="file-paste-help" autocomplete="off"></textarea>
+            <button id="upload-file" class="upload-button" type="button" title="选择或粘贴文件（TXT、MD、PDF、DOCX；每个文件最多 20 MB）" aria-label="添加文件"><svg class="icon"><use href="#i-plus"/></svg></button>
           </div>
           <div class="composer-toolbar">
             <div class="composer-options">
-              <button id="web-search" class="search-toggle" type="button" aria-pressed="false" title="开启后先搜索网页，再参考结果回答"><svg class="icon"><use href="#i-globe"/></svg><span>联网搜索</span><span class="toggle-dot"></span></button>
-              <span class="composer-divider"></span><span id="composer-mode" class="composer-mode">从容思考，认真回答</span>
+              <span id="composer-mode" class="composer-mode">从容思考，认真回答</span>
             </div>
             <div class="send-group"><span id="character-count" class="character-count" hidden></span><button id="send" type="submit" class="send-button" aria-label="发送消息" title="发送消息" disabled><svg class="icon"><use href="#i-arrow"/></svg></button></div>
           </div>
         </form>
         <p id="upload-status" class="upload-status" role="status" hidden></p>
-        <div class="composer-footnote"><span>Enter 发送<span class="footnote-separator">·</span>Shift + Enter 换行</span><span id="context-note">好问题，值得认真回答。</span></div>
+        <p id="file-paste-help" class="sr-only">支持粘贴 TXT、MD、PDF、DOCX 文件，每个最多 20 MB。上传完成后，文件会随这条问题一起发送。</p>
+        <div class="composer-footnote"><span>Enter 发送<span class="footnote-separator">·</span>Shift + Enter 换行<span class="footnote-separator">·</span>Ctrl + V 粘贴文件</span><span id="context-note">好问题，值得认真回答。</span></div>
       </div>
     </main>
   </div>

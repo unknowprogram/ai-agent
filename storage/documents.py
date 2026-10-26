@@ -159,6 +159,19 @@ def list_conversation_documents(conversation_id: str) -> list[dict]:
     return [get_document(file_id) for file_id in ids]
 
 
+def get_document_metadata(document_ids: list[str]) -> list[dict]:
+    """读取供 Agent 选择文件的元数据，不读取分块正文。"""
+    if not document_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(document_ids))
+    with _transaction() as conn, conn.cursor() as cursor:
+        cursor.execute(
+            f"SELECT id AS file_id, filename, file_type, char_count FROM documents WHERE id IN ({placeholders}) ORDER BY id",
+            tuple(document_ids),
+        )
+        return list(cursor.fetchall())
+
+
 def get_document_chunks(document_ids: list[str]) -> list[dict]:
     if not document_ids:
         return []

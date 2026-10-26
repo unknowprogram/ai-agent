@@ -19,10 +19,10 @@ from core.exceptions import (
 from storage import documents
 
 
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-MAX_DOCUMENT_CHARS = 200_000
-MAX_PDF_PAGES = 200
-MAX_CHUNKS = 400
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_DOCUMENT_CHARS = 500_000
+MAX_PDF_PAGES = 500
+MAX_CHUNKS = 800
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
@@ -91,7 +91,7 @@ def _read_docx(raw: bytes) -> list[tuple[str, str]]:
         if len(members) > 2000:
             raise FileTooLargeError()
 
-        if sum(item.file_size for item in members) > 50 * 1024 * 1024:
+        if sum(item.file_size for item in members) > 100 * 1024 * 1024:
             raise FileTooLargeError()
 
     document = Document(BytesIO(raw))

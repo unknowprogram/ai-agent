@@ -3,14 +3,15 @@
 
   const $ = (selector) => document.querySelector(selector);
   const STORAGE_KEY = 'zhixu.conversations.v1';
+  const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
   const elements = {
-    form: $('#chat-form'), input: $('#message'), send: $('#send'), search: $('#web-search'),
+    form: $('#chat-form'), input: $('#message'), send: $('#send'),
     welcome: $('#welcome'), messages: $('#messages'), scroll: $('#conversation-scroll'),
     sessions: $('#session-list'), newChat: $('#new-chat'), error: $('#error-banner'),
     errorText: $('#error-text'), sidebar: $('#sidebar'), backdrop: $('#sidebar-backdrop'),
     menu: $('#menu-toggle'),
   };
-  const state = { sessions: [], activeId: null, searchEnabled: false, pending: null, loading: false, preview: null, uploading: false, newFiles: [] };
+  const state = { sessions: [], activeId: null, pending: null, loading: false, preview: null, uploading: false, newFiles: [] };
   let toastTimer;
   let retryMessage = '';
 
@@ -42,7 +43,7 @@
   function normalizeSources(sources) {
     if (!Array.isArray(sources)) return [];
     return sources.filter((source) => source && typeof source.title === 'string' && safeURL(source.url))
-      .slice(0, 10).map((source) => ({ title: source.title, url: source.url, content: typeof source.content === 'string' ? source.content : '' }));
+      .slice(0, 15).map((source) => ({ title: source.title, url: source.url, content: typeof source.content === 'string' ? source.content : '' }));
   }
 
   function normalizeFiles(files) {
@@ -50,7 +51,14 @@
   }
 
   function normalizeDocumentSources(sources) {
-    return Array.isArray(sources) ? sources.filter(source => source && typeof source.file_id === 'string' && typeof source.filename === 'string' && typeof source.content === 'string').slice(0, 4) : [];
+    return Array.isArray(sources) ? sources.filter(source => source && typeof source.file_id === 'string' && typeof source.filename === 'string' && typeof source.content === 'string').slice(0, 12) : [];
+  }
+
+  function normalizeDocumentSummaries(summaries) {
+    if (!Array.isArray(summaries)) return [];
+    return summaries.filter(item => item && typeof item.file_id === 'string' && typeof item.filename === 'string'
+      && Number.isInteger(item.coverage?.total_chunks) && Number.isInteger(item.coverage?.processed_chunks))
+      .slice(0, 3).map(item => ({ file_id: item.file_id, filename: item.filename, query: item.query, coverage: item.coverage }));
   }
 
   function stagedFiles() { return activeSession()?.stagedFiles || state.newFiles; }
@@ -96,11 +104,12 @@
       queue.push(entry); renderAttachments();
       try {
         if (!/\.(txt|md|pdf|docx)$/i.test(file.name)) throw new Error('仅支持 TXT、MD、PDF、DOCX。');
-        if (file.size > 10 * 1024 * 1024) throw new Error('文件不能超过 10 MB。');
+        if (file.size > MAX_UPLOAD_BYTES) throw new Error('文件不能超过 20 MB。');
         const body = new FormData(); body.append('file', file);
         const response = await fetch('/api/files', { method: 'POST', body, signal: AbortSignal.timeout(90000) });
         const data = await response.json();
         if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '文件上传失败。');
+        if (typeof data.file_id !== 'string' || !data.file_id || typeof data.filename !== 'string') throw new Error('服务未返回有效文件信息，请移除后重试。');
         Object.assign(entry, data, { uploading: false });
       } catch (error) {
         entry.uploading = false;
@@ -109,7 +118,7 @@
       renderAttachments(); persist();
     }
     state.uploading = false;
-    $('#upload-status').textContent = queue.some(file => file.error) ? '部分文件识别失败，请移除失败附件后重试。' : '文件已识别，输入问题后发送；扫描件暂不支持 OCR。';
+    $('#upload-status').textContent = queue.some(file => file.error) ? '部分文件识别失败，请移除失败附件后重试。' : '文件已添加，将随这条问题一起发送。';
     renderSidebar(); updateInput(); elements.input.focus();
   }
 
@@ -129,10 +138,9 @@
         stagedFiles: normalizeFiles(session.stagedFiles),
         title: typeof session.title === 'string' ? session.title.slice(0, 80) : '未命名对话',
         messages: session.messages.filter((message) => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string')
-          .slice(-80).map((message) => ({ ...message, content: message.content.slice(0, 64000), sources: normalizeSources(message.sources) })),
+          .slice(-80).map((message) => ({ ...message, content: message.content.slice(0, 64000), sources: normalizeSources(message.sources), files: normalizeFiles(message.files) })),
       }));
       state.activeId = state.sessions.some((session) => session.id === saved.activeId) ? saved.activeId : null;
-      state.searchEnabled = saved.searchEnabled === true;
       state.newFiles = normalizeFiles(saved.newFiles);
     } catch { /* 浏览器不允许本地存储时，仍可在当前页面正常对话。 */ }
   }
@@ -141,7 +149,7 @@
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         sessions: state.sessions.filter((session) => session.messages.length || session.stagedFiles?.length).slice(0, 20),
-        activeId: state.activeId, searchEnabled: state.searchEnabled,
+        activeId: state.activeId,
         newFiles: normalizeFiles(state.newFiles),
       }));
     } catch { toast('当前对话暂时无法保存到浏览器，仍可继续聊天。'); }
@@ -161,12 +169,17 @@
   async function loadSession(session) {
     if (!session?.conversationId) return;
     const data = await fetchJSON(`/api/conversations/${encodeURIComponent(session.conversationId)}`);
-    const cached = new Map(session.messages.map((message) => [`${message.role}\0${message.content}`, message]));
+    const cached = new Map();
+    for (const message of session.messages) {
+      const key = `${message.role}\0${message.content}`;
+      if (!cached.has(key)) cached.set(key, []);
+      cached.get(key).push(message);
+    }
     session.title = data.title;
     session.files = normalizeFiles(data.files);
     session.stagedFiles = normalizeFiles(session.stagedFiles).filter(file => !session.files.some(bound => bound.file_id === file.file_id));
     session.messages = data.messages.filter((message) => ['user', 'assistant'].includes(message.role)).map((message) => {
-      const previous = cached.get(`${message.role}\0${message.content}`);
+      const previous = cached.get(`${message.role}\0${message.content}`)?.shift();
       return { ...previous, role: message.role, content: message.content, databaseId: message.id, sources: normalizeSources(previous?.sources) };
     });
   }
@@ -397,7 +410,25 @@
 
   function messageView(message) {
     const article = node('article', `message message-${message.role}`);
-    if (message.role === 'user') { article.append(node('div', 'user-bubble', message.content)); return article; }
+    if (message.role === 'user') {
+      const bubble = node('div', 'user-bubble');
+      const files = normalizeFiles(message.files);
+      if (files.length) {
+        const attachments = node('div', 'user-files');
+        attachments.setAttribute('aria-label', '随这条问题发送的文件');
+        for (const file of files) {
+          const card = node('div', 'attachment user-file');
+          const info = node('div', 'attachment-info');
+          const name = node('div', 'attachment-name', file.filename);
+          name.title = file.filename;
+          info.append(name, node('div', 'attachment-meta', typeof file.file_type === 'string' ? file.file_type.toUpperCase() : '文件'));
+          card.append(icon('book'), info); attachments.append(card);
+        }
+        bubble.append(attachments);
+      }
+      bubble.append(node('div', 'user-text', message.content));
+      article.append(bubble); return article;
+    }
     const heading = node('div', 'assistant-heading');
     const avatar = node('span', 'assistant-avatar'); avatar.append(icon('spark'));
     heading.append(avatar, node('strong', '', '知序'));
@@ -415,10 +446,20 @@
       if (message.incomplete) body.append(node('p', 'incomplete-note', '输出已中断 · 保存状态未确认，可重新加载会话查看'));
       const sources = normalizeSources(message.sources);
       if (sources.length) body.append(renderSources(sources));
+      for (const item of normalizeDocumentSummaries(message.documentSummaries)) {
+        const coverage = item.coverage;
+        const panel = node('section', 'summary-coverage');
+        panel.append(node('strong', '', `摘要覆盖范围 · ${item.filename}`));
+        const complete = coverage.all_extracted_text_scanned === true && coverage.processed_chunks === coverage.total_chunks;
+        panel.append(node('p', '', `${complete ? '已扫描全部已提取文字' : '已处理部分文字'} · ${coverage.processed_chunks}/${coverage.total_chunks} 个片段 · ${coverage.start_location || ''} 至 ${coverage.end_location || ''}`));
+        if (typeof item.query === 'string') panel.append(node('p', '', `本次归纳范围：${item.query}`));
+        if (coverage.warning_count > 0) panel.append(node('p', 'summary-warning', `文件有 ${coverage.warning_count} 条解析提示，未提取文字或扫描图片不在本次覆盖范围内。`));
+        body.append(panel);
+      }
       const fileSources = normalizeDocumentSources(message.documentSources);
       if (fileSources.length) {
         const section = node('section', 'sources file-sources');
-        section.append(node('div', 'sources-title', `文件参考片段 · ${fileSources.length}`));
+        section.append(node('div', 'sources-title', `${message.documentSummaries?.length ? '摘要引用片段' : '文件参考片段'} · ${fileSources.length}`));
         for (const source of fileSources) {
           const details = node('details');
           details.append(node('summary', '', `${source.filename} · ${source.location || '正文'} · 片段 ${source.chunk_index}`), node('p', '', source.content));
@@ -446,7 +487,7 @@
     if (optimisticMessage) messages.push(optimisticMessage, { role: 'assistant', loading: true, usedSearch: state.pending?.useSearch });
     else if (state.preview && state.preview.sessionId === state.activeId) {
       messages.push(
-        { role: 'user', content: state.preview.question },
+        { role: 'user', content: state.preview.question, files: state.preview.files },
         { role: 'assistant', content: state.preview.content, sources: state.preview.sources, usedSearch: state.preview.usedSearch, incomplete: true },
       );
     }
@@ -465,17 +506,16 @@
     $('#character-count').hidden = count < 6500;
     $('#character-count').textContent = `${count.toLocaleString()} / 8,000`;
     const pending = Boolean(state.pending);
-    elements.send.disabled = state.loading || state.uploading || (!pending && !elements.input.value.trim());
+    const invalidFiles = stagedFiles().some(file => file.error || file.uploading || !file.file_id);
+    elements.send.disabled = state.loading || state.uploading || (!pending && (!elements.input.value.trim() || invalidFiles));
     elements.send.classList.toggle('stopping', pending);
     elements.send.replaceChildren(icon(pending ? 'stop' : 'arrow'));
     elements.send.setAttribute('aria-label', pending ? '停止生成回答' : '发送消息');
     elements.send.title = pending ? '停止接收回答' : '发送消息';
     elements.input.disabled = pending || state.loading;
-    elements.search.disabled = pending || state.loading || state.uploading;
     $('#upload-file').disabled = pending || state.loading || state.uploading;
     $('#retry').disabled = pending || state.loading || state.uploading;
-    elements.search.setAttribute('aria-pressed', String(state.searchEnabled));
-    $('#composer-mode').textContent = state.loading ? '正在读取会话记忆……' : (state.searchEnabled ? '搜索网页，参考来源回答' : '从容思考，认真回答');
+    $('#composer-mode').textContent = state.loading ? '正在读取会话记忆……' : '从容思考，认真回答';
     renderAttachments();
   }
 
@@ -551,8 +591,12 @@
     const message = elements.input.value.trim();
     if (!message) return;
     if (message.length > 8000) { showError('消息最多 8000 字符，请精简后重试。'); return; }
+    if (stagedFiles().some(file => file.error || file.uploading || !file.file_id)) {
+      showError('请先完成附件上传，或移除失败附件后再发送。'); return;
+    }
     state.preview = null;
     const attached = stagedFiles().filter(file => file.file_id && !file.error);
+    const messageFiles = attached.map(({ file_id, filename, file_type }) => ({ file_id, filename, file_type }));
     let session = activeSession();
     const created = !session;
     if (!session) {
@@ -561,14 +605,13 @@
       state.activeId = session.id;
     }
     const controller = new AbortController();
-    const useSearch = state.searchEnabled;
     retryMessage = '';
     elements.input.value = '';
-    state.pending = { controller, useSearch };
+    state.pending = { controller, useSearch: false };
     elements.error.hidden = true;
-    renderSidebar(); updateInput(); renderConversation({ role: 'user', content: message });
+    renderSidebar(); updateInput(); renderConversation({ role: 'user', content: message, files: messageFiles });
     const outputBody = elements.messages.lastElementChild.querySelector('.assistant-body');
-    const partial = { text: '', sources: [] };
+    const partial = { text: '', sources: [], searched: false };
     let liveText;
     let paintFrame;
     let result;
@@ -588,13 +631,18 @@
         if (follow) elements.scroll.scrollTop = elements.scroll.scrollHeight;
       });
     }
-    const timeout = setTimeout(() => controller.abort('timeout'), 150000);
+    let timeout;
+    function resetTimeout() {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => controller.abort('timeout'), 180000);
+    }
+    resetTimeout();
     try {
       const response = await fetch('/api/chat/stream', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
         body: JSON.stringify({
           message, conversation_id: session.conversationId,
-          history: session.conversationId ? [] : contextFor(session.messages, message), web_search: useSearch,
+          history: session.conversationId ? [] : contextFor(session.messages, message),
           file_ids: attached.map(file => file.file_id),
         }),
         signal: controller.signal,
@@ -606,7 +654,33 @@
         const error = new Error(detail); error.status = response.status; throw error;
       }
       await readEvents(response, (name, data) => {
-        if (name === 'sources') partial.sources = normalizeSources(data.sources);
+        resetTimeout();
+        if (name === 'sources') {
+          partial.sources = normalizeSources(data.sources);
+          partial.searched = data.searched === true;
+          state.pending.useSearch = partial.searched;
+          if (partial.searched && !outputBody.parentElement.querySelector('.search-badge')) {
+            const badge = node('span', 'search-badge');
+            badge.append(icon('globe'), document.createTextNode('已联网检索'));
+            outputBody.parentElement.querySelector('.assistant-heading').append(badge);
+          }
+        }
+        else if (name === 'tool_start') {
+          if (data.reset) {
+            if (paintFrame) cancelAnimationFrame(paintFrame);
+            paintFrame = null; liveText = null; partial.text = '';
+          }
+          const prefix = data.name === 'summarize_document' ? '正在分段总结文档' : (data.name === 'search_documents' ? '正在检索文档' : '正在搜索网页');
+          const label = typeof data.query === 'string' && data.query ? `${prefix}：${data.query}` : '正在准备查询资料……';
+          const status = node('div', 'thinking', label);
+          status.setAttribute('role', 'status');
+          outputBody.replaceChildren(status);
+        }
+        else if (name === 'tool_progress') {
+          const status = node('div', 'thinking', typeof data.message === 'string' ? data.message : '正在处理文档……');
+          status.setAttribute('role', 'status');
+          outputBody.replaceChildren(status);
+        }
         else if (name === 'delta') appendText(data.text);
         else if (name === 'error') {
           const error = new Error(typeof data.detail === 'string' ? data.detail : '回答生成失败，请重试。');
@@ -623,8 +697,8 @@
       state.newFiles = [];
       $('#upload-status').hidden = true;
       session.messages.push(
-        { role: 'user', content: message },
-        { role: 'assistant', content: data.reply, sources: normalizeSources(data.sources), documentSources: normalizeDocumentSources(data.document_sources), model: data.model, usage: data.usage, usedSearch: useSearch },
+        { role: 'user', content: message, files: messageFiles },
+        { role: 'assistant', content: data.reply, sources: normalizeSources(data.sources), documentSources: normalizeDocumentSources(data.document_sources), documentSummaries: normalizeDocumentSummaries(data.document_summaries), model: data.model, usage: data.usage, usedSearch: data.searched === true },
       );
       session.messages = session.messages.slice(-80);
       state.sessions = [session, ...state.sessions.filter((item) => item.id !== session.id)].slice(0, 20);
@@ -634,7 +708,7 @@
       retryMessage = message;
       if (created) { state.newFiles = session.stagedFiles; state.sessions = state.sessions.filter((item) => item.id !== session.id); state.activeId = null; }
       if (partial.text) {
-        state.preview = { sessionId: state.activeId, question: message, content: partial.text, sources: partial.sources, usedSearch: useSearch };
+        state.preview = { sessionId: state.activeId, question: message, files: messageFiles, content: partial.text, sources: partial.sources, usedSearch: partial.searched };
       }
       if (controller.signal.aborted && controller.signal.reason === 'user') toast('已停止接收。');
       else if (controller.signal.aborted) showError('等待回答超时，请稍后重试。');
@@ -676,11 +750,22 @@
     if (files.length) await uploadFiles(files);
   });
   elements.input.addEventListener('input', updateInput);
+  elements.input.addEventListener('paste', async (event) => {
+    const clipboard = event.clipboardData;
+    if (!clipboard) return;
+    let files = [...(clipboard.files || [])];
+    if (!files.length) {
+      files = [...(clipboard.items || [])].filter(item => item.kind === 'file').map(item => item.getAsFile()).filter(Boolean);
+    }
+    if (!files.length) return;
+    event.preventDefault();
+    if (state.pending || state.loading || state.uploading) { toast('请等当前操作完成后再粘贴文件。'); return; }
+    await uploadFiles(files);
+  });
   elements.input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); elements.form.requestSubmit(); }
   });
   elements.newChat.addEventListener('click', startNew);
-  elements.search.addEventListener('click', () => { state.searchEnabled = !state.searchEnabled; updateInput(); persist(); });
   elements.menu.addEventListener('click', () => toggleSidebar(!elements.sidebar.classList.contains('open')));
   elements.backdrop.addEventListener('click', () => toggleSidebar(false));
   $('#connection').addEventListener('click', checkConnection);
@@ -693,7 +778,6 @@
   for (const suggestion of document.querySelectorAll('.suggestion')) {
     suggestion.addEventListener('click', () => {
       elements.input.value = suggestion.dataset.prompt;
-      if (suggestion.dataset.search === 'true') state.searchEnabled = true;
       updateInput(); persist(); elements.input.focus();
     });
   }

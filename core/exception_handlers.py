@@ -92,7 +92,7 @@ ERROR_SPECS: dict[type[Exception], ErrorSpec] = {
     ),
     ContextTooLargeError: ErrorSpec(
         status.HTTP_400_BAD_REQUEST,
-        "当前问题与系统提示词超过上下文预算，请缩短问题。",
+        "当前问题、系统提示词与工具结果超过上下文预算，请缩短问题。",
     ),
     UnsupportedFileError: ErrorSpec(
         status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,

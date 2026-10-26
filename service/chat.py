@@ -6,12 +6,14 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 
-from agent.llm import LLMReply, ask_llm, stream_llm
+from agent.llm import LLMReply
+from agent.runner import AgentResult, run_agent
 from agent.prompts import SYSTEM_PROMPT
-from agent.rag import retrieve_documents
-from service.context import build_context
+from tools.documents import available_documents
+from tools.document_summary import SUMMARY_CONTEXT_CHARS
+from core.exceptions import LLMResponseError
+from service.context import MAX_INPUT_CHARS, build_context
 from service.memory import MemoryContext, load_context, save_turn
-from tools.web_search import web_search
 
 
 @dataclass(frozen=True)
@@ -20,22 +22,38 @@ class ChatResult:
     sources: list[dict[str, str]]
     conversation_id: str
     document_sources: list[dict]
+    searched: bool = False
+    document_summaries: list[dict] | None = None
 
 
 @dataclass(frozen=True)
 class PreparedChat:
     memory: MemoryContext
     messages: list[dict[str, str]]
-    sources: list[dict[str, str]]
     file_ids: list[str]
-    document_sources: list[dict]
+    available_documents: list[dict]
+    question_files: list[dict]
+    question: str
+    summary: str
+    preferences: dict[str, str] | None
+    search_mode: bool | None
+
+    def build_messages(self, tool_messages: list[dict], searched: bool) -> list[dict]:
+        has_summary = any(item["role"] == "tool" and json.loads(item["content"]).get("source_type") == "document_summary" for item in tool_messages)
+        return build_context(
+            system_prompt=SYSTEM_PROMPT, question=self.question, history=self.memory.history,
+            summary=self.summary, preferences=self.preferences, available_documents=self.available_documents,
+            search_mode=self.search_mode, tool_messages=tool_messages, searched=searched,
+            question_files=self.question_files,
+            max_input_chars=SUMMARY_CONTEXT_CHARS if has_summary else MAX_INPUT_CHARS,
+        )
 
 
 async def prepare_chat(
     message: str,
     history: list[dict[str, str]],
     *,
-    use_web_search: bool = False,
+    use_web_search: bool | None = None,
     conversation_id: str | None = None,
     summary: str = "",
     preferences: dict[str, str] | None = None,
@@ -43,35 +61,35 @@ async def prepare_chat(
 ) -> PreparedChat:
     # 1. 读取当前会话的数据库历史。
     memory = await load_context(conversation_id, history)
-    document_ids, document_sources = await retrieve_documents(message, conversation_id, file_ids or [])
+    document_ids, metadata = await available_documents(conversation_id, file_ids or [])
+    requested_ids = set(file_ids or [])
+    question_files = [item for item in metadata if item["file_id"] in requested_ids]
 
-    # 2. 按需搜索；失败时由全局异常处理器返回错误。
-    sources = []
-
-    if use_web_search:
-        sources = await web_search(message[:400])
-
-    # 3. 统一组装上下文。
+    # 2. 先提供文件清单，正文检索和联网搜索都由模型工具调用决定。
     messages = build_context(
         system_prompt=SYSTEM_PROMPT,
         question=message,
         history=memory.history,
         summary=summary,
         preferences=preferences,
-        references=sources,
-        searched=use_web_search,
-        documents=document_sources,
+        search_mode=use_web_search,
+        available_documents=metadata,
+        question_files=question_files,
     )
 
-    included = [item for item in document_sources if json.dumps(item, ensure_ascii=False) in messages[-1]["content"]]
-    return PreparedChat(memory=memory, messages=messages, sources=sources, file_ids=document_ids, document_sources=included)
+    return PreparedChat(
+        memory=memory, messages=messages, file_ids=document_ids,
+        available_documents=metadata, question=message,
+        question_files=question_files,
+        summary=summary, preferences=preferences, search_mode=use_web_search,
+    )
 
 
 async def chat(
     message: str,
     history: list[dict[str, str]],
     *,
-    use_web_search: bool = False,
+    use_web_search: bool | None = None,
     conversation_id: str | None = None,
     summary: str = "",
     preferences: dict[str, str] | None = None,
@@ -82,9 +100,18 @@ async def chat(
         conversation_id=conversation_id, summary=summary, preferences=preferences,
         file_ids=file_ids,
     )
-    answer = await ask_llm(prepared.messages)
+    result = None
+    async with aclosing(run_agent(
+        prepared.build_messages, search_mode=prepared.search_mode, file_ids=prepared.file_ids,
+    )) as agent:
+        async for name, data in agent:
+            if name == "result":
+                result = data
+    if not isinstance(result, AgentResult):
+        raise LLMResponseError()
+    answer = result.answer
 
-    # 5. 保存原始问题和回答，不把附加搜索资料写成用户问题。
+    # 保存原始问题和最终回答；工具过程不写入会话消息。
     saved_id = await save_turn(
         prepared.memory,
         message,
@@ -94,9 +121,11 @@ async def chat(
 
     return ChatResult(
         answer=answer,
-        sources=prepared.sources,
+        sources=result.sources,
         conversation_id=saved_id,
-        document_sources=prepared.document_sources,
+        document_sources=result.document_sources,
+        searched=result.searched,
+        document_summaries=result.document_summaries,
     )
 
 
@@ -104,19 +133,25 @@ async def stream_chat(
     message: str, prepared: PreparedChat,
     is_disconnected: Callable[[], Awaitable[bool]],
 ) -> AsyncIterator[tuple[str, dict]]:
-    yield "sources", {"sources": prepared.sources, "document_sources": prepared.document_sources}
+    yield "sources", {"sources": [], "document_sources": [], "searched": False}
     # aclosing 保证浏览器断开或任务取消时关闭 SDK 生成器。
-    async with aclosing(stream_llm(prepared.messages)) as chunks:
-        async for chunk in chunks:
+    async with aclosing(run_agent(
+        prepared.build_messages, search_mode=prepared.search_mode,
+        file_ids=prepared.file_ids,
+        streaming=True, is_disconnected=is_disconnected,
+    )) as events:
+        async for name, data in events:
             if await is_disconnected():
                 return
-            if isinstance(chunk, str):
-                yield "delta", {"text": chunk}
+            if name != "result":
+                yield name, data
             else:
-                saved_id = await save_turn(prepared.memory, message, chunk.reply, prepared.file_ids)
+                answer = data.answer
+                saved_id = await save_turn(prepared.memory, message, answer.reply, prepared.file_ids)
                 yield "done", {
-                    "conversation_id": saved_id, "reply": chunk.reply,
-                    "model": chunk.model, "usage": chunk.usage,
-                    "sources": prepared.sources,
-                    "document_sources": prepared.document_sources,
+                    "conversation_id": saved_id, "reply": answer.reply,
+                    "model": answer.model, "usage": answer.usage,
+                    "sources": data.sources, "searched": data.searched,
+                    "document_sources": data.document_sources,
+                    "document_summaries": data.document_summaries,
                 }
