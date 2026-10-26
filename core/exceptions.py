@@ -65,3 +65,11 @@ class DocumentNotFoundError(RuntimeError):
 
 class DocumentLimitError(RuntimeError):
     """会话关联文件数量超过限制。"""
+
+
+class FileDataUnavailableError(RuntimeError):
+    """文件元数据存在，但原始表格数据缺失。"""
+
+
+class SemanticSearchUnavailableError(RuntimeError):
+    """向量模型未准备好或无法完成推理。"""

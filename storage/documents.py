@@ -13,9 +13,26 @@ def save_document(
     char_count: int,
     chunks: list[dict],
     warnings: list[str],
+    raw: bytes | None = None,
 ) -> str:
     file_id = str(uuid.uuid4())
 
+    if raw is not None:
+        # 先保存原文件，成功提交数据库后才向调用方返回文件 ID。
+        from storage.file_data import save_file_data
+        save_file_data(file_id, raw)
+
+    try:
+        _save_document_metadata(file_id, filename, file_type, char_count, chunks, warnings)
+    except BaseException:
+        if raw is not None:
+            from storage.file_data import remove_file_data
+            remove_file_data(file_id)
+        raise
+    return file_id
+
+
+def _save_document_metadata(file_id, filename, file_type, char_count, chunks, warnings):
     with _transaction() as conn, conn.cursor() as cursor:
         cursor.execute(
             """
@@ -50,8 +67,6 @@ def save_document(
                 for index, chunk in enumerate(chunks, start=1)
             ],
         )
-
-    return file_id
 
 
 def get_document(file_id: str) -> dict:

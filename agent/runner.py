@@ -1,5 +1,6 @@
 """执行模型自主选择的联网和文档工具，普通和流式聊天共用有限循环。"""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
@@ -8,7 +9,14 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from agent.llm import LLMReply, ask_llm, stream_llm
-from core.exceptions import ContextTooLargeError, LLMResponseError
+from core.exceptions import (
+    ContextTooLargeError, FileDataUnavailableError, FileParseError, FileTooLargeError,
+    LLMResponseError, SemanticSearchUnavailableError,
+)
+from storage import documents
+from tools.analyze_spreadsheet import SPREADSHEET_TOOL, SPREADSHEET_TYPES, SpreadsheetArguments, analyze_spreadsheet_file
+from tools.calculate import CALCULATE_TOOL, CalculateArguments, calculate
+from tools.semantic_search import SEMANTIC_TOOL, SemanticSearchArguments, semantic_search
 from tools.documents import DOCUMENT_TOOL, DocumentSearchArguments, search_documents
 from tools.document_summary import SUMMARY_TOOL, SUMMARY_OUTPUT_TOKENS, DocumentSummaryArguments, SummaryResult, summarize_document
 from tools.web_search import SEARCH_TOOL, SearchArguments, web_search
@@ -17,7 +25,57 @@ MAX_TOOL_ROUNDS = 2
 MAX_TOOL_CALLS = 3
 
 
-TOOL_ARGUMENTS = {"web_search": SearchArguments, "search_documents": DocumentSearchArguments, "summarize_document": DocumentSummaryArguments}
+TOOL_ARGUMENTS = {
+    "web_search": SearchArguments, "search_documents": DocumentSearchArguments,
+    "summarize_document": DocumentSummaryArguments, "semantic_search": SemanticSearchArguments,
+    "analyze_spreadsheet": SpreadsheetArguments, "calculate": CalculateArguments,
+}
+
+
+async def _tool_events(coroutine, name: str):
+    """耗时的本地推理和表格统计也发出心跳，避免浏览器误判为停滞。"""
+    task = asyncio.create_task(coroutine)
+    try:
+        while not task.done():
+            done, _ = await asyncio.wait({task}, timeout=15)
+            if not done:
+                yield "progress", {"name": name, "message": "工具仍在处理，请稍候……"}
+        yield "result", await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+def _trim_spreadsheet(data: dict) -> bool:
+    """只裁剪展示字段，保持 JSON 有效、统计范围和统计值不变。"""
+    for key in ("preview", "numeric_summary", "rows", "sheets", "columns"):
+        items = data.get(key)
+        if isinstance(items, list) and len(items) > 1:
+            data[key] = items[:max(1, len(items) // 2)]
+            data["display_truncated"] = True
+            return True
+    for key in ("preview", "numeric_summary", "rows"):
+        for row in data.get(key, []):
+            if not isinstance(row, dict):
+                continue
+            for field, value in row.items():
+                if isinstance(value, str) and len(value) > 200:
+                    row[field] = value[:max(200, len(value) // 2)]
+                    data["display_truncated"] = True
+                    return True
+            if len(row) > 2:
+                for field in list(row)[max(2, len(row) // 2):]:
+                    del row[field]
+                data["display_truncated"] = True
+                return True
+    for key in ("dtypes", "missing"):
+        fields = data.get(key)
+        if isinstance(fields, dict) and len(fields) > 1:
+            data[key] = dict(list(fields.items())[:max(1, len(fields) // 2)])
+            data["display_truncated"] = True
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -75,6 +133,10 @@ def _fit_messages(build_messages: Callable, tool_messages: list[dict], searched:
                 if message["role"] != "tool":
                     continue
                 data = json.loads(message["content"])
+                if data.get("source_type") == "spreadsheet" and _trim_spreadsheet(data):
+                    message["content"] = _json(data)
+                    changed = True
+                    break
                 results = data.get("results", [])
                 if not results:
                     continue
@@ -95,6 +157,7 @@ async def run_agent(
     build_messages: Callable[[list[dict], bool], list[dict]],
     *, search_mode: bool | None = None, streaming: bool = False,
     file_ids: list[str] | None = None,
+    file_metadata: list[dict] | None = None,
     is_disconnected: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[tuple[str, dict | AgentResult]]:
     tool_messages = []
@@ -105,6 +168,12 @@ async def run_agent(
     seen_summaries = {}
     total_usage = None
     file_ids = list(file_ids or [])
+    # 文件类型来自服务器，模型不能通过自行传入 ID 扩大范围。
+    if file_metadata is None:
+        file_metadata = await asyncio.to_thread(documents.get_document_metadata, file_ids) if file_ids else []
+    metadata = {item["file_id"]: item for item in file_metadata if item["file_id"] in file_ids}
+    text_file_ids = [key for key in file_ids if metadata.get(key, {}).get("file_type") in {"txt", "md", "pdf", "docx"}]
+    spreadsheet_ids = [key for key in file_ids if metadata.get(key, {}).get("file_type") in SPREADSHEET_TYPES]
 
     for round_index in range(MAX_TOOL_ROUNDS + 1):
         if is_disconnected and await is_disconnected():
@@ -113,8 +182,12 @@ async def run_agent(
         tools = []
         if within_budget and search_mode is not False:
             tools.append(SEARCH_TOOL)
-        if within_budget and file_ids:
-            tools.extend([DOCUMENT_TOOL, SUMMARY_TOOL])
+        if within_budget:
+            tools.append(CALCULATE_TOOL)
+            if text_file_ids:
+                tools.extend([DOCUMENT_TOOL, SUMMARY_TOOL, SEMANTIC_TOOL])
+            if spreadsheet_ids:
+                tools.append(SPREADSHEET_TOOL)
         enabled = bool(tools)
         tools = tools or None
         names = {tool["function"]["name"] for tool in tools or []}
@@ -181,14 +254,58 @@ async def run_agent(
                     try:
                         arguments = TOOL_ARGUMENTS[call.name].model_validate_json(call.arguments)
                     except ValidationError:
-                        data = {"error": "工具参数无效，请按工具定义修正 query、数量或 file_id；不允许额外字段。"}
+                        data = {"error": "工具参数无效，请按对应工具定义修正参数；不允许额外字段。"}
                     else:
-                        if call.name in {"search_documents", "summarize_document"} and arguments.file_id and str(arguments.file_id) not in file_ids:
+                        requested_id = getattr(arguments, "file_id", None)
+                        scope = spreadsheet_ids if call.name == "analyze_spreadsheet" else text_file_ids
+                        if requested_id and str(requested_id) not in scope:
                             data = {"error": "该文件不在当前会话范围，只能使用系统提供的文件清单。"}
             if data is None:
-                query = arguments.query
+                query = getattr(arguments, "query", None) or getattr(arguments, "expression", None)
+                if query is None:
+                    query = metadata[str(arguments.file_id)]["filename"] + " / " + arguments.operation
                 yield "tool_start", {"name": call.name, "query": query, "reset": False}
-                key = (call.name, arguments.model_dump_json().casefold())
+                # 表名、列名、筛选值区分大小写，不能对整个参数 JSON 做 casefold。
+                key = (call.name, arguments.model_dump_json())
+                if call.name in {"calculate", "semantic_search", "analyze_spreadsheet"}:
+                    try:
+                        if key in seen_queries:
+                            data = seen_queries[key]
+                        elif call.name == "calculate":
+                            data = {"source_type": "calculation", **calculate(**arguments.model_dump())}
+                        else:
+                            if call.name == "semantic_search":
+                                scope = [str(arguments.file_id)] if arguments.file_id else text_file_ids
+                                coroutine = semantic_search(arguments.query, scope, arguments.limit)
+                            else:
+                                coroutine = analyze_spreadsheet_file(
+                                    str(arguments.file_id), **arguments.model_dump(exclude={"file_id"}),
+                                )
+                            async with aclosing(_tool_events(coroutine, call.name)) as events:
+                                async for event_name, event_data in events:
+                                    if is_disconnected and await is_disconnected():
+                                        return
+                                    if event_name == "progress":
+                                        yield "tool_progress", event_data
+                                    else:
+                                        data = event_data
+                            if call.name == "semantic_search":
+                                data = {"source_type": "document", "query": query, "results": data}
+                        seen_queries[key] = data
+                    except SemanticSearchUnavailableError:
+                        data = {"error": "语义模型未准备好，可改用 search_documents 关键词检索；不能声称语义检索成功。"}
+                    except FileDataUnavailableError:
+                        data = {"error": "原始表格数据缺失，请用户重新上传文件。"}
+                    except FileTooLargeError:
+                        data = {"error": "表格大小或解析规模超过限制，请缩小文件。"}
+                    except FileParseError:
+                        data = {"error": "表格文件解析失败，请检查文件格式。"}
+                    except ValueError as exc:
+                        data = {"error": str(exc)[:300], "name": call.name}
+                    tool_messages.append({"role": "tool", "tool_call_id": call.id, "content": _json(data)})
+                    if data.get("source_type") == "document":
+                        yield "sources", {"sources": sources, "searched": searched, "document_sources": _document_sources(tool_messages), "document_summaries": _document_summaries(tool_messages)}
+                    continue
                 if call.name == "summarize_document":
                     if key in seen_summaries:
                         summary = seen_summaries[key]
@@ -218,7 +335,7 @@ async def run_agent(
                     if call.name == "web_search":
                         results = await web_search(query, arguments.max_results)
                     else:
-                        scope = [str(arguments.file_id)] if arguments.file_id else file_ids
+                        scope = [str(arguments.file_id)] if arguments.file_id else text_file_ids
                         results = await search_documents(query, scope, arguments.limit)
                     seen_queries[key] = results
                 if call.name == "web_search":

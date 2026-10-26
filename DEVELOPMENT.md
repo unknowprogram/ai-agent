@@ -34,12 +34,15 @@
 | 多轮会话 | MySQL 持久化问答，后续通过 `conversation_id` 恢复最近历史 |
 | 会话管理 | 创建、列出、读取、删除会话 |
 | 文件问答 | Agent 自主调用 search_documents 查询条款，或 summarize_document 扫描全部已提取文字并分段汇总 |
+| 语义检索 | semantic_search 使用本地 BGE 中文模型查询同义表达，返回真实片段 |
+| 表格分析 | analyze_spreadsheet 读取 Excel/CSV 完整数据，支持筛选、分组和统计 |
+| 精确计算 | calculate 使用 AST 白名单和有理数计算，明确报告小数舍入 |
 | 联网搜索 | DeepSeek 自主生成 `web_search` 工具调用，后端执行 Tavily 并回传结果 |
 | 引用展示 | 网页显示搜索来源与实际进入上下文的文件片段 |
 | 输入与异常管理 | Pydantic 校验、统一业务异常、统一 HTTP 状态码 |
 | 开发调试 | FastAPI 自动生成 Swagger 和 OpenAPI |
 
-当前执行顺序为：读取记忆 → 校验文件范围并提供清单 → 组装上下文 → 模型自主决定回答或调用工具 → 回传工具结果并继续调用模型 → 保存最终问答。`agent/runner.py` 开放 `web_search`、`search_documents` 与 `summarize_document`，共享最多 2 轮、合计 3 次调用的外层预算。摘要内部的分段读取、归纳和合并在一次工具调用中完成。未单独处理或展示模型的 `reasoning_content`。
+当前执行顺序为：读取记忆 → 校验文件范围并提供清单 → 组装上下文 → 模型自主决定回答或调用工具 → 回传工具结果并继续调用模型 → 保存最终问答。`agent/runner.py` 开放 `web_search`、`search_documents`、`summarize_document`、`semantic_search`、`analyze_spreadsheet` 和 `calculate`，按服务端文件类型提供工具，共享最多 2 轮、合计 3 次调用的外层预算。摘要内部的分段读取、归纳和合并在一次工具调用中完成。未单独处理或展示模型的 `reasoning_content`。
 
 ## 2. 技术栈
 
@@ -63,7 +66,7 @@
 | Fetch / ReadableStream / TextDecoder | 浏览器网络能力 | 请求接口、增量解析 UTF-8 SSE、取消请求 |
 | localStorage | 浏览器缓存 | 缓存会话列表、消息及部分展示信息 |
 
-本地现有虚拟环境使用 Python 3.15.0，这只是当前环境快照，不代表项目已对所有 Python 版本完成兼容验证。依赖以 [requirements.txt](requirements.txt) 为准，大部分依赖尚未锁定版本。
+本次验证的本地虚拟环境使用 Python 3.13.14，不代表项目已对所有 Python 版本完成兼容验证。依赖以 [requirements.txt](requirements.txt) 为准，大部分依赖尚未锁定版本。
 
 ## 3. 目录结构与分层
 
@@ -107,12 +110,18 @@ ai-agent/
 ├── storage/
 │   ├── __init__.py
 │   ├── mysql.py               # 连接、事务、会话与消息存储
-│   └── documents.py           # 文档与分块存储
+│   ├── documents.py           # 文档与分块存储
+│   └── file_data.py           # UUID 命名的表格原文件存储
 ├── tools/
 │   ├── __init__.py
 │   ├── web_search.py          # Tavily REST 客户端
 │   ├── document_summary.py    # 完整扫描与分段摘要工具
-│   └── documents.py           # 文档清单与片段检索工具
+│   ├── documents.py           # 文档清单与片段检索工具
+│   ├── semantic_search.py     # 本地模型向量检索
+│   ├── analyze_spreadsheet.py # Excel/CSV 完整数据分析
+│   └── calculate.py           # 有理数精确计算
+├── tests/
+│   └── test_extended_tools.py # 工具、存储、上传及 Agent 协议测试
 └── static/
     ├── index.html             # 页面结构
     ├── styles.css             # 页面样式
@@ -147,7 +156,7 @@ flowchart TD
 | 文件 | 代码 / 内容作用 | 阅读或修改时关注 |
 | --- | --- | --- |
 | [main.py](main.py) | 创建 FastAPI 应用；注册异常处理器和四组路由；挂载 `/static`；返回首页和 `/health`；直接执行时启动 Uvicorn | 新增路由需要在此注册；默认监听 `127.0.0.1:8000` |
-| [requirements.txt](requirements.txt) | 声明运行依赖 | 新能力需要新依赖时更新；目前只给 `python-docx` 指定了最低版本 |
+| [requirements.txt](requirements.txt) | 声明运行依赖 | 新能力需要新依赖时更新；文档与表格依赖指定最低版本 |
 | [agent_db.sql](agent_db.sql) | 创建会话、消息、文档、分块、关联五张表 | 是当前唯一统一建表入口；没有 `storage/schema.sql` |
 | [README.md](README.md) | 安装、启动、接口及页面的快速使用说明 | 适合首次运行项目时阅读 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 代码结构、模块职责、调用流程与扩展说明 | 随实际代码维护 |
@@ -238,6 +247,11 @@ flowchart TD
 | --- | --- | --- |
 | [tools/__init__.py](tools/__init__.py) | 包初始化文件 | 标识 `tools` 包 |
 | [tools/web_search.py](tools/web_search.py) | `_search()`、`web_search()` | 请求 Tavily，限制响应大小，校验返回字段和 URL，裁剪摘要；将网络和上游状态转换为搜索异常 |
+| [tools/semantic_search.py](tools/semantic_search.py) | `SEMANTIC_TOOL`、`semantic_search()` | 延迟加载本地 BGE 模型，将文档拆成短片段进行向量排序，返回命中的原文 |
+| [tools/analyze_spreadsheet.py](tools/analyze_spreadsheet.py) | `SPREADSHEET_TOOL`、`analyze_spreadsheet_file()` | 读取原始工作簿，校验规模，支持工作表清单、预览、概况、等值筛选、分组和排序 |
+| [tools/calculate.py](tools/calculate.py) | `CALCULATE_TOOL`、`calculate()` | AST 白名单解析表达式，使用 Fraction 保留精确值，使用 Decimal 生成展示小数 |
+| [storage/file_data.py](storage/file_data.py) | `save_file_data()`、`get_file_data()` | 原子写入 `.data/files/<UUID>.bin`；元数据事务失败时清理本次原文件 |
+| [tests/test_extended_tools.py](tests/test_extended_tools.py) | unittest 测试 | 覆盖实际 CSV/XLSX 读取、精确计算、文件存储、上传接口和模拟模型工具协议 |
 
 `_search()` 是同步 HTTP 请求；`web_search()` 校验参数与密钥后，通过 `asyncio.to_thread()` 调用它，避免阻塞异步事件循环。
 
@@ -542,8 +556,9 @@ flowchart LR
 | TXT / MD | UTF-16 BOM 检测；否则依次尝试 UTF-8（允许 BOM）、GB18030 | 位置为“正文”；纯文本路径检查 NUL 字符，异常内容可能被拒绝 |
 | PDF | `pypdf.PdfReader` 提取各页文字 | 保留“第 N 页”；无文字页记入警告，不做 OCR；加密时仅尝试空密码解密 |
 | DOCX | 读取 ZIP 结构后，通过 `iter_inner_content()` 按顺序提取段落与表格 | 表格单元格使用 ` | ` 连接；位置为“正文”；没有排版渲染，因此不提供推测页码 |
+| XLSX / XLS / CSV | pandas 配合 openpyxl / xlrd 读取完整工作簿 | 上传预览只含表头和前 5 行，原文件保留用于完整分析；位置为工作表名称 |
 
-图片、扫描件 OCR、旧版 DOC、Excel 尚未实现。PDF 全部提取不到文字会返回错误；混合 PDF 可保留有文字页面，并返回其他页面的警告。
+图片、扫描件 OCR、旧版 DOC 尚未实现。PDF 全部提取不到文字会返回错误；混合 PDF 可保留有文字页面，并返回其他页面的警告。
 
 ### 9.3 限制与分块
 
@@ -557,6 +572,9 @@ flowchart LR
 | 相邻块重叠 | 150 字符 |
 | DOCX ZIP 条目 | 最多 2000 个 |
 | DOCX 声明的解压总大小 | 最多 100 MiB |
+| 表格工作表 / 行 / 列 | 最多 20 张工作表，每张 100000 行、100 列 |
+| 工作簿数据单元格 | 总计最多 2000000 个；逐表读取后立即校验 |
+| XLSX 解压规模 | 最多 2000 个条目、100 MiB |
 | 每会话文件 | 请求文件与已绑定文件合并去重后最多 5 个 |
 | 文件名 | 去除路径信息，最多保留 255 字符并尽量保留扩展名 |
 
@@ -595,7 +613,19 @@ JSON 与 SSE 完成响应均包含 `document_summaries`，每项有 `file_id`、
 
 ### 9.6 文件存储与生命周期
 
-长期保存的是提取后的文字、分块和元数据，原始上传文件不会长期落盘归档。当前没有文件下载、删除、解绑接口或无引用文档清理任务。移除待发送附件只是取消本轮选择，不会删除已经上传的文档记录。
+数据库长期保存提取后的文字、分块和元数据。表格原文件由 `storage/file_data.py` 保存到 `.data/files/<UUID>.bin`，写入临时文件后原子替换，数据库元数据保存失败则删除本次原文件。重启后可重新读取完整表格；其他文档原件不长期归档。当前没有文件下载、删除、解绑接口或无引用文档清理任务。移除待发送附件只是取消本轮选择，不会删除已经上传的文档记录。
+
+### 9.7 语义检索、表格分析与精确计算
+
+`semantic_search` 只对文本文档开放，按服务端限定的文件 ID 读取分块，将每块拆成 400 字、重叠 80 字的短片段，计算归一化向量点积。每个原始分块只返回最相关的短片段，最多 4 个；原文位置和 char_start 一起保留。模型按需加载，默认 BAAI/bge-small-zh-v1.5、CPU；`SEMANTIC_MODEL_PATH` 可指定本地模型，`SEMANTIC_DEVICE` 可指定设备。在线请求只加载已有本地权重，准备模型的命令见 README。加载或推理失败回传明确错误，Agent 可改用关键词检索。
+
+`analyze_spreadsheet` 只对表格开放，读取当前会话范围内的原文件。支持 sheets、preview、profile、aggregate；工作表可按索引或名称选择，filters 使用等值 AND 条件，null 选择空值。聚合支持 sum、mean、min、max、count、分组及按统计值排序；limit 只限制展示分组，matched_rows 表示完整匹配行数。整数求和转换成 Python 整数以避免 int64 溢出；常规浮点统计不保证财务小数精确性。最近一个完整工作簿缓存在内存，原文件仍持久保存。
+
+`calculate` 对所有聊天开放，不要求 query 或文件参数。AST 仅允许十进制数字、科学计数法、括号和算术运算，使用 Fraction 计算 exact，生成 decimal 时使用 Decimal 和 HALF_EVEN 舍入；rounded 表示展示值是否近似。表达式最多 1000 字符、128 个 AST 节点，中间值最多 4096 位二进制位，幂指数为 -100～100 的整数。除零和不支持语法以工具错误回传，不执行代码。
+
+所有工具共用原有调用预算。参数校验和文件范围校验先于实际执行；工具缓存保留列名、工作表名和筛选值的大小写。表格和计算完成后的输入预算为 12000 字符；表格结果按 JSON 字段裁剪展示内容并设置 display_truncated，不裁剪精确计算结果。耗时语义检索和表格分析每 15 秒报告仍在处理的进度。
+
+自动验证：`.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`。测试使用真实 CSV/XLSX 数据和本地临时存储，模型工具协议和向量使用确定性模拟，不调用真实模型服务或数据库。
 
 ## 10. 联网搜索
 
@@ -945,8 +975,8 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 | Agent | 已有自主网页与文档工具循环；未处理独立思考字段 | 扩展工具注册、权限与执行协议，按模型适配思考字段 |
 | 记忆 | 最近历史窗口，固定示例摘要和偏好 | 自动摘要、事实记忆、用户设置持久化 |
 | 上下文 | 字符预算，非 Token 感知 | 根据模型 Token 估算分配预算，并验证输出预留 |
-| 文件理解 | 文字提取、词法检索及全部已提取文字的分段汇总 | OCR、向量检索、重排、摘要事实覆盖评估 |
-| 文件管理 | 原文件不归档，无删除 / 解绑 / 清理接口 | 生命周期、原件存储、配额与清理任务 |
+| 文件理解 | 文字提取、词法与向量检索、分段汇总、Excel/CSV 分析 | OCR、重排、摘要事实覆盖评估 |
+| 文件管理 | 表格原件落盘，无删除 / 解绑 / 清理接口 | 生命周期、配额与清理任务 |
 | 数据库 | 每操作建立连接，无连接池 | 根据并发量引入连接池和监控 |
 | 用户隔离 | 没有登录、用户表或资源归属鉴权 | 用户认证，以及会话、文件访问授权 |
 | 展示元数据 | 来源、模型和用量未完整随消息入库 | 扩展每轮消息或调用记录表 |
@@ -956,4 +986,4 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 
 生产部署应使用独立配置和进程管理，关闭开发重载；如果经过 Nginx 等代理，需确保 SSE 不被缓存或缓冲，并配置合适的读取超时。应用已发送 `Cache-Control: no-cache` 和 `X-Accel-Buffering: no`，仍需确认代理实际生效。
 
-模型、Tavily 和数据库密钥仅由服务端读取，不应写入静态文件或提交到仓库。日志和文档应继续避免复制真实配置。数据库备份至少应覆盖这五张表；文档原文件当前不在项目中长期保存。
+模型、Tavily 和数据库密钥仅由服务端读取，不应写入静态文件或提交到仓库。日志和文档应继续避免复制真实配置。备份至少应覆盖五张业务表和 `.data/files/` 表格原件；`.data/` 已加入 Git 忽略规则。

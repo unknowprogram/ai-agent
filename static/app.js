@@ -103,7 +103,7 @@
       const entry = { filename: file.name, uploading: true };
       queue.push(entry); renderAttachments();
       try {
-        if (!/\.(txt|md|pdf|docx)$/i.test(file.name)) throw new Error('仅支持 TXT、MD、PDF、DOCX。');
+        if (!/\.(txt|md|pdf|docx|xlsx|xls|csv)$/i.test(file.name)) throw new Error('仅支持 TXT、MD、PDF、DOCX、XLSX、XLS、CSV。');
         if (file.size > MAX_UPLOAD_BYTES) throw new Error('文件不能超过 20 MB。');
         const body = new FormData(); body.append('file', file);
         const response = await fetch('/api/files', { method: 'POST', body, signal: AbortSignal.timeout(90000) });
@@ -670,7 +670,15 @@
             if (paintFrame) cancelAnimationFrame(paintFrame);
             paintFrame = null; liveText = null; partial.text = '';
           }
-          const prefix = data.name === 'summarize_document' ? '正在分段总结文档' : (data.name === 'search_documents' ? '正在检索文档' : '正在搜索网页');
+          const prefixes = {
+            summarize_document: '正在分段总结文档',
+            search_documents: '正在检索文档',
+            semantic_search: '正在进行语义检索',
+            analyze_spreadsheet: '正在分析表格',
+            calculate: '正在精确计算',
+            web_search: '正在搜索网页',
+          };
+          const prefix = prefixes[data.name] || '正在处理工具';
           const label = typeof data.query === 'string' && data.query ? `${prefix}：${data.query}` : '正在准备查询资料……';
           const status = node('div', 'thinking', label);
           status.setAttribute('role', 'status');

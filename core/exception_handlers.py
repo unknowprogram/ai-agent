@@ -21,6 +21,8 @@ from core.exceptions import (
     FileTextUnavailableError,
     DocumentNotFoundError,
     DocumentLimitError,
+    FileDataUnavailableError,
+    SemanticSearchUnavailableError,
 
 
 )
@@ -96,7 +98,7 @@ ERROR_SPECS: dict[type[Exception], ErrorSpec] = {
     ),
     UnsupportedFileError: ErrorSpec(
         status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-        "目前支持 TXT、MD、PDF、DOCX 文件。",
+        "目前支持 TXT、MD、PDF、DOCX、XLSX、XLS、CSV 文件。",
     ),
     FileTooLargeError: ErrorSpec(
         status.HTTP_413_CONTENT_TOO_LARGE,
@@ -117,6 +119,12 @@ ERROR_SPECS: dict[type[Exception], ErrorSpec] = {
     DocumentLimitError: ErrorSpec(
         status.HTTP_400_BAD_REQUEST,
         "每个会话最多关联 5 个文件。",
+    ),
+    FileDataUnavailableError: ErrorSpec(
+        status.HTTP_400_BAD_REQUEST, "原始表格数据缺失，请重新上传该文件。",
+    ),
+    SemanticSearchUnavailableError: ErrorSpec(
+        status.HTTP_503_SERVICE_UNAVAILABLE, "语义模型未准备好，请配置本地模型或使用关键词检索。",
     ),
 }
 

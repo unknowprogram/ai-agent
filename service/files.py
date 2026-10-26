@@ -27,7 +27,7 @@ MAX_CHUNKS = 800
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 
-SUPPORTED_SUFFIXES = {".txt", ".md", ".pdf", ".docx"}
+SUPPORTED_SUFFIXES = {".txt", ".md", ".pdf", ".docx", ".xlsx", ".xls", ".csv"}
 
 
 def _decode_text(raw: bytes) -> str:
@@ -197,6 +197,11 @@ def parse_file(
         elif suffix == ".pdf":
             sections, warnings = _read_pdf(raw)
 
+        elif suffix in {".xlsx", ".xls", ".csv"}:
+            from tools.analyze_spreadsheet import spreadsheet_sections
+            sections = spreadsheet_sections(filename, raw)
+            warnings.append("正文仅保存表头和前 5 行预览；完整统计请使用表格分析工具。")
+
         else:
             sections = _read_docx(raw)
 
@@ -244,6 +249,7 @@ async def ingest_file(filename: str, raw: bytes) -> dict:
         char_count,
         chunks,
         warnings,
+        raw if file_type in {"xlsx", "xls", "csv"} else None,
     )
 
     return await asyncio.to_thread(

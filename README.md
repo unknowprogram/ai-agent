@@ -59,7 +59,7 @@ MYSQL_DATABASE=agent_db
 历史消息只允许 `user`、`assistant` 角色，系统提示词由服务端设置。
 每条输入最多 8000 字符，历史最多 40 条，总输入最多 60000 字符。
 服务端将对话原文保存在 MySQL，默认读取最近 20 条用户及助手消息作为记忆。
-API 校验限制总历史及当前问题最多 60000 字符；实际模型输入由 `service/context.py` 统一裁剪，普通问答字符预算为 6000，包含系统规则、资料、当前问题和历史。文件摘要工具完成后的综合回答使用 24000 字符预算，不影响数据库中的完整原文。
+API 校验限制总历史及当前问题最多 60000 字符；实际模型输入由 `service/context.py` 统一裁剪，普通问答字符预算为 6000，包含系统规则、资料、当前问题和历史。表格统计与精确计算结果使用 12000 字符预算，文件摘要工具完成后的综合回答使用 24000 字符预算，不影响数据库中的完整原文。
 前端展示最近 20 段会话，并为当前会话加载最近 80 条消息。
 
 错误状态码：422 参数错误，429 模型限流或额度限制，502 上游调用失败，
@@ -74,7 +74,7 @@ Swagger 中已列出聊天接口的错误状态码及响应结构。
 `POST /api/chat/stream` 使用与 `/api/chat` 相同的请求体，返回 `text/event-stream`。
 前端使用 `fetch` 读取 SSE，支持中文跨数据块解码和逐段追加显示。
 
-- `tool_start`：Agent 准备调用工具，`name` 区分 `web_search`、`search_documents` 和 `summarize_document`，`query` 为查询范围；`reset: true` 清除中间说明，等待最终回答。
+- `tool_start`：Agent 准备调用工具，`name` 区分 `web_search`、`search_documents`、`summarize_document`、`semantic_search`、`analyze_spreadsheet` 和 `calculate`；`query` 展示查询范围、文件名或表达式；`reset: true` 清除中间说明，等待最终回答。
 - `tool_progress`：摘要工具的章节定位、分段读取 / 归纳、合并进度，包含 `stage`、`message`，分段处理时还有 `completed`、`total`。
 - `sources`：本轮网页来源 `sources`、是否已执行联网搜索 `searched`、文档引用 `document_sources` 及已完成的摘要 `document_summaries`；首次事件来源为空，工具执行后更新。
 - `delta`：正文片段，数据格式为 `{"text": "回答片段"}`。
@@ -211,7 +211,7 @@ MySQL 同步操作在线程中执行，聊天生成期间不占用数据库连�
 启动 FastAPI 后访问 http://127.0.0.1:8000 即可使用，无需安装 Node.js 或运行前端构建命令。
 
 - 输入消息后点击发送或按 Enter，输入框在提交时立即清空；Shift + Enter 换行。
-- 点击输入框的 `+` 选择文件，或复制 TXT、MD、PDF、DOCX 文件后在输入框按 Ctrl + V 粘贴。文件会自动上传，普通文字仍可正常粘贴；每个文件最多 20 MB。
+- 点击输入框的 `+` 选择文件，或复制 TXT、MD、PDF、DOCX、XLSX、XLS、CSV 文件后在输入框按 Ctrl + V 粘贴。文件会自动上传，普通文字仍可正常粘贴；每个文件最多 20 MB。
 - 首次询问文件时，上传完成后输入问题并发送；本条请求携带文件 ID，问题气泡显示附件卡片，Agent 的当前问题上下文也明确标记该附件。上传未完成或有失败附件时不能发送，需等待或移除失败附件。
 - 发送成功后，输入区的待发送卡片清空，文件卡片保留在它随附的那条问题中；文件绑定会话供后续追问。回答下方的「文件参考片段」可展开查看来源内容。
 - 直接发送问题，Agent 自主判断是否搜索；搜索时显示查询状态，完成后展示参考来源。
@@ -251,8 +251,8 @@ MySQL 同步操作在线程中执行，聊天生成期间不占用数据库连�
 先安装 `requirements.txt`，再执行 `.\.venv\Scripts\python.exe -m storage.mysql --init` 补齐文档表。
 上传依赖为 `python-multipart`、`pypdf` 和 `python-docx>=1.1.0`，无需额外的文件识别 API 密钥。
 
-支持 TXT、Markdown、带文字层的 PDF、DOCX 段落及表格。PDF 保留页码，DOCX 的位置标为「正文」，不生成不可靠的页码。
-扫描 PDF 或图片没有可提取文字时会提示需要 OCR；当前不支持图片识别、OCR、旧版 DOC、Excel 和密码保护文件。
+支持 TXT、Markdown、带文字层的 PDF、DOCX 段落及表格，以及 XLSX、XLS、CSV。PDF 保留页码，DOCX 的位置标为「正文」，不生成不可靠的页码。Excel/CSV 使用 pandas、openpyxl 和 xlrd 解析。
+扫描 PDF 或图片没有可提取文字时会提示需要 OCR；当前不支持图片识别、OCR、旧版 DOC 和密码保护文件。
 混合型 PDF 的无文字页面会出现在上传结果的 `warnings` 中，可用页面仍继续解析。
 
 限制：单文件最多 20 MiB、PDF 最多 500 页、提取正文最多 500000 字符、最多 800 个片段；
@@ -298,10 +298,35 @@ DOCX 解压后大小不超过 100 MiB、压缩条目不超过 2000 个。
 工具只访问服务端校验后的当前会话文件，未调用时不读取正文分块。所有工具共享每轮最多 2 轮、合计 3 次调用的外层预算；摘要内部的模型调用在一次工具执行中完成，用量累计到本轮 `usage`。摘要最多 128 个读取批次、8 层合并；分段归纳与中间合并最多 4096 Token，最终摘要及综合回答最多 8192 Token。分段或中间合并输出截断时自动缩小当前输入后重试，完整保留文字和摘要要点；超过处理上限、不能继续拆分、最终输出截断或结果格式异常时返回错误，不把未完成处理显示为完整摘要。
 普通及流式完成响应的 `document_summaries` 包含文件名、查询范围、摘要、相关主题和 `coverage`（已处理 / 总片段数、批次数、起止位置、`all_extracted_text_scanned`、解析提示）。页面仅缓存展示所需元数据；数据库仍只保存最终问答。完整扫描指全部已提取文字，不含未提取的扫描页或图片，也不保证模型归纳毫无遗漏。
 
-数据库保存提取后的文本、分块和文件信息，上传原始文件不长期保留。
+数据库保存提取后的文本、分块和文件信息。表格原文件保存在 `.data/files/<文件UUID>.bin`，重启后仍可分析；表格正文只保存表头和前 5 行预览。其他文档原文件不长期保留。部署或备份时，需要同时保存数据库和 `.data/files/`。
 移除待发送附件只取消本轮选择；删除会话会删除关联，不删除可被其他会话使用的文档及分块。
 上传后未使用的文档也会保留，当前没有自动清理任务。
 
 文件错误沿用统一响应：415 类型不支持，413 文件或解析规模过大，400 文件损坏、无文字或会话文件数量超限，404 文件不存在。
 文件正文仅作为参考数据，不作为系统指令；只在所关联会话范围内检索。
 当前服务没有用户认证或多用户权限隔离，适用于现有的本机使用方式。
+
+## 语义检索、表格分析和精确计算
+
+三个工具已接入普通和流式聊天，共享现有 2 轮、合计 3 次工具调用预算。工具按服务端文件类型开放；表格不会使用文档预览进行统计。参数错误、除零和缺失列等错误回传模型，允许在预算内修正。
+
+`semantic_search(query, file_id?, limit=4)` 使用 BGE 中文向量模型检索当前会话文档。模型只在工具实际调用时加载；只使用本地已有权重，不在在线请求中下载。首次准备模型可执行：
+
+```powershell
+.\.venv\Scripts\python.exe -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-zh-v1.5').save('.data/models/bge-small-zh-v1.5')"
+$env:SEMANTIC_MODEL_PATH = "$PWD\.data\models\bge-small-zh-v1.5"
+```
+
+模型准备命令需要访问模型下载站点。也可把预先下载的完整模型目录配置到 `SEMANTIC_MODEL_PATH`；`SEMANTIC_DEVICE` 默认为 `cpu`。未准备模型时工具返回明确错误，Agent 可改用关键词检索。相似度不是答案正确率；结果保留实际命中的短片段和原始位置。
+
+`analyze_spreadsheet(file_id, ...)` 支持 `sheets`、`preview`、`profile` 和 `aggregate`；工作表可按名称或从 0 开始的索引选择。`filters` 按列精确匹配，多个条件为 AND，null 表示空值。聚合支持 sum、mean、min、max、count、按列分组，以及 sort=asc/desc。count 未指定列时统计行数，指定列时统计非空值。limit 只限制展示条数，统计处理全部匹配行；结果提供 matched_rows 和截断标记。浮点统计不保证财务小数精确性。
+
+表格限制：单文件 20 MiB、最多 20 张工作表、每张最多 100000 行和 100 列、工作簿总数据单元格最多 2000000 个、XLSX 解压后最多 100 MiB。空工作表可以列出和预览。原文件缺失时提示重新上传。
+
+`calculate(expression, decimal_places=28)` 使用 AST 白名单和 Fraction 精确计算，支持十进制、科学计数法、括号及 `+ - * / // % **`。`exact` 始终是精确结果，`decimal` 是展示小数，`rounded` 表示是否舍入；整数幂指数限定为 -100～100，不执行函数或变量。表达式最多 1000 字符，展示小数最多 100 位。
+
+验证命令（不调用外部模型或真实数据库）：
+
+```powershell
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
+```

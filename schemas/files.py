@@ -18,6 +18,8 @@ class DocumentSource(BaseModel):
     chunk_index: int
     location: str
     content: str
+    score: float | None = None
+    char_start: int | None = Field(default=None, ge=0)
 
 
 class SummaryCoverage(BaseModel):

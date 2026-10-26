@@ -86,11 +86,11 @@
         <div id="error-banner" class="error-banner" role="alert" hidden><span id="error-text"></span><button id="retry" type="button">重试</button><button id="dismiss-error" class="icon-button" aria-label="关闭错误提示"><svg class="icon"><use href="#i-close"/></svg></button></div>
         <form id="chat-form" class="composer">
           <div id="attachments" class="attachments" aria-label="当前会话附件" aria-live="polite" hidden></div>
-          <input id="file-input" class="sr-only" type="file" accept=".txt,.md,.pdf,.docx" multiple tabindex="-1">
+          <input id="file-input" class="sr-only" type="file" accept=".txt,.md,.pdf,.docx,.xlsx,.xls,.csv" multiple tabindex="-1">
           <label for="message" class="sr-only">向知序发送消息</label>
           <div class="message-input-wrap">
             <textarea id="message" rows="1" maxlength="8000" placeholder="输入问题，也可以在这里粘贴文件……" aria-describedby="file-paste-help" autocomplete="off"></textarea>
-            <button id="upload-file" class="upload-button" type="button" title="选择或粘贴文件（TXT、MD、PDF、DOCX；每个文件最多 20 MB）" aria-label="添加文件"><svg class="icon"><use href="#i-plus"/></svg></button>
+            <button id="upload-file" class="upload-button" type="button" title="选择或粘贴文件（TXT、MD、PDF、DOCX、XLSX、XLS、CSV；每个文件最多 20 MB）" aria-label="添加文件"><svg class="icon"><use href="#i-plus"/></svg></button>
           </div>
           <div class="composer-toolbar">
             <div class="composer-options">
@@ -100,7 +100,7 @@
           </div>
         </form>
         <p id="upload-status" class="upload-status" role="status" hidden></p>
-        <p id="file-paste-help" class="sr-only">支持粘贴 TXT、MD、PDF、DOCX 文件，每个最多 20 MB。上传完成后，文件会随这条问题一起发送。</p>
+        <p id="file-paste-help" class="sr-only">支持粘贴 TXT、MD、PDF、DOCX、XLSX、XLS、CSV 文件，每个最多 20 MB。上传完成后，文件会随这条问题一起发送。</p>
         <div class="composer-footnote"><span>Enter 发送<span class="footnote-separator">·</span>Shift + Enter 换行<span class="footnote-separator">·</span>Ctrl + V 粘贴文件</span><span id="context-note">好问题，值得认真回答。</span></div>
       </div>
     </main>
