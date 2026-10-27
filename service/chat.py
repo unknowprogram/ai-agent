@@ -2,7 +2,6 @@
 """协调记忆、搜索、上下文组装及模型调用。"""
 
 from dataclasses import dataclass
-import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 
@@ -10,9 +9,8 @@ from agent.llm import LLMReply
 from agent.runner import AgentResult, run_agent
 from agent.prompts import SYSTEM_PROMPT
 from tools.documents import available_documents
-from tools.document_summary import SUMMARY_CONTEXT_CHARS
 from core.exceptions import LLMResponseError
-from service.context import MAX_INPUT_CHARS, STRUCTURED_CONTEXT_CHARS, build_context
+from service.context import build_context, context_budget
 from service.memory import MemoryContext, load_context, save_turn
 
 
@@ -39,14 +37,12 @@ class PreparedChat:
     search_mode: bool | None
 
     def build_messages(self, tool_messages: list[dict], searched: bool) -> list[dict]:
-        has_summary = any(item["role"] == "tool" and json.loads(item["content"]).get("source_type") == "document_summary" for item in tool_messages)
-        has_structured = any(item["role"] == "tool" and json.loads(item["content"]).get("source_type") in {"calculation", "spreadsheet"} for item in tool_messages)
         return build_context(
             system_prompt=SYSTEM_PROMPT, question=self.question, history=self.memory.history,
             summary=self.summary, preferences=self.preferences, available_documents=self.available_documents,
             search_mode=self.search_mode, tool_messages=tool_messages, searched=searched,
             question_files=self.question_files,
-            max_input_chars=SUMMARY_CONTEXT_CHARS if has_summary else STRUCTURED_CONTEXT_CHARS if has_structured else MAX_INPUT_CHARS,
+            max_input_chars=context_budget(tool_messages, searched),
         )
 
 
@@ -76,6 +72,7 @@ async def prepare_chat(
         search_mode=use_web_search,
         available_documents=metadata,
         question_files=question_files,
+        max_input_chars=context_budget(),
     )
 
     return PreparedChat(
@@ -105,6 +102,7 @@ async def chat(
     async with aclosing(run_agent(
         prepared.build_messages, search_mode=prepared.search_mode, file_ids=prepared.file_ids,
         file_metadata=prepared.available_documents,
+        question=prepared.question,
     )) as agent:
         async for name, data in agent:
             if name == "result":
@@ -141,6 +139,7 @@ async def stream_chat(
         prepared.build_messages, search_mode=prepared.search_mode,
         file_ids=prepared.file_ids,
         file_metadata=prepared.available_documents,
+        question=prepared.question,
         streaming=True, is_disconnected=is_disconnected,
     )) as events:
         async for name, data in events:

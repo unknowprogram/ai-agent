@@ -42,7 +42,7 @@
 | 输入与异常管理 | Pydantic 校验、统一业务异常、统一 HTTP 状态码 |
 | 开发调试 | FastAPI 自动生成 Swagger 和 OpenAPI |
 
-当前执行顺序为：读取记忆 → 校验文件范围并提供清单 → 组装上下文 → 模型自主决定回答或调用工具 → 回传工具结果并继续调用模型 → 保存最终问答。`agent/runner.py` 开放 `web_search`、`search_documents`、`summarize_document`、`semantic_search`、`analyze_spreadsheet` 和 `calculate`，按服务端文件类型提供工具，共享最多 2 轮、合计 3 次调用的外层预算。摘要内部的分段读取、归纳和合并在一次工具调用中完成。未单独处理或展示模型的 `reasoning_content`。
+当前执行顺序为：读取记忆 → 校验文件范围并提供清单 → 组装上下文 → 模型自主决定回答或调用工具 → 回传工具结果并继续调用模型 → 保存最终问答。`agent/runner.py` 开放 `web_search`、`scrape_webpage`、`search_documents`、`summarize_document`、`semantic_search`、`analyze_spreadsheet` 和 `calculate`，按服务端文件类型提供工具，共享最多 2 轮、合计 3 次调用的外层预算。网页及文档摘要内部的分段读取、归纳和合并在一次工具调用中完成。未单独处理或展示模型的 `reasoning_content`。
 
 ## 2. 技术栈
 
@@ -115,13 +115,16 @@ ai-agent/
 ├── tools/
 │   ├── __init__.py
 │   ├── web_search.py          # Tavily REST 客户端
+│   ├── scrape_webpage.py      # 网页抓取、正文提取与进度
+│   ├── webpage_summary.py     # 长网页分段归纳与有界阅读结果
 │   ├── document_summary.py    # 完整扫描与分段摘要工具
 │   ├── documents.py           # 文档清单与片段检索工具
 │   ├── semantic_search.py     # 本地模型向量检索
 │   ├── analyze_spreadsheet.py # Excel/CSV 完整数据分析
 │   └── calculate.py           # 有理数精确计算
 ├── tests/
-│   └── test_extended_tools.py # 工具、存储、上传及 Agent 协议测试
+│   ├── test_webpage_context.py # 预算、裁剪与 Agent 流程
+│   └── test_webpage_summary.py # 全部分段、末尾覆盖与 HTTP/SSE 验证
 └── static/
     ├── index.html             # 页面结构
     ├── styles.css             # 页面样式
@@ -497,13 +500,13 @@ SSE 本身是单向事件流，本项目使用 `fetch` 发起 POST 并读取响�
 | 单条问题 / 导入历史文本长度 | 去除首尾空白后 1–8000 字符 | `schemas/chat.py` |
 | 请求携带历史条数 | 最多 40 条 | `schemas/chat.py` |
 | 请求问题与历史合计 | 最多 60000 字符 | `ChatRequest.validate_context()` |
-| 实际模型输入正文总预算 | 普通问答 6000 字符；摘要工具完成后 24000 字符 | `MAX_INPUT_CHARS`、`SUMMARY_CONTEXT_CHARS` |
+| 实际模型输入正文总预算 | 普通问答、表格统计、精确计算 16000 字符；搜索、网页读取及文档摘要综合回答 24000 字符 | `context_budget()`、`MAX_INPUT_CHARS`、`WEBPAGE_CONTEXT_CHARS`、`STRUCTURED_CONTEXT_CHARS`、`SUMMARY_CONTEXT_CHARS` |
 | 最多保留的历史消息 | 20 条，且需完整轮次和预算允许 | `MAX_HISTORY_MESSAGES` |
 | 摘要 | 初始最多 3000 字符 | `MAX_SUMMARY_CHARS` |
 | 网页参考 | 初始最多 5 条，每条摘要最多 2000 字符，标题最多 200 字符 | `_prepare_references()` |
 | 用户偏好 | 最多 5 项；键最多 40、值最多 300 字符 | `build_context()` |
 
-60000 是 API 接收上限；6000 / 24000 是普通问答 / 摘要综合回答的上下文预算。基础消息累计 `content` 字符数，工具消息累计 JSON 字符数；该预算不是模型 Token 数，也不包含工具定义及协议的全部开销。
+60000 是 API 接收上限；16000 / 24000 是统一由 `context_budget()` 根据工具调用及实际结果选择的上下文预算，混合工具使用其中较大的预算。预算识别搜索结果、网页结果及失败的网页工具调用；请求准备也使用同一入口。基础消息累计 `content` 字符数，工具消息累计 JSON 字符数；该预算不是模型 Token 数，也不包含工具定义及协议的全部开销。
 
 工具循环还将工具调用与结果消息的 JSON 字符数计入预算。超预算时先裁剪历史与附加资料，再压缩工具摘要；保留完整的工具 ID 配对及合法 JSON。因此，一条不足 8000 字符、通过 Pydantic 的问题，仍可能因系统提示与工具消息超过预算而返回 400。
 
@@ -519,7 +522,11 @@ assistant：tool_calls（仅本轮实际模型工具调用）
 tool：网页摘要或文档片段（仅实际执行结果）
 ```
 
-`build_context()` 在系统提示中提供已校验的文件清单，将真实工具调用与结果保留在独立消息中，并计入预算。预算不足时压缩摘要、偏好和历史，再由 Agent 压缩工具结果的正文片段，保留 ID 配对和合法 JSON。仍超限则返回上下文错误。
+`build_context()` 在系统提示中提供已校验的文件清单，将真实工具调用与结果保留在独立消息中，并计入预算。预算不足时压缩摘要、偏好和历史，再由 Agent 移除中间工具调用说明并压缩工具结果，保留 ID 配对和合法 JSON。网页结果优先减少附加链接，再缩短标题和正文，完整来源 URL 不截断；`truncated` 标明裁剪，`links_truncated` 标明链接减少。仍超限则返回上下文错误。
+
+长网页在进入上述循环前，由 `tools/webpage_summary.py` 分段处理全部保留正文。每页最多保留 240000 字符，最多 64 段，每段不超过 8000 个 JSON 字符；各段摘要逐级合并，最终工具结果最多 5000 个 JSON 字符。`summarized=true` 表示返回摘要；`coverage.extracted_chars`、`processed_chars`、`parts`、`source_truncated` 说明真实处理范围。短网页可直接返回，不额外调用摘要模型；长网页内部模型用量计入本轮聊天响应。分段及合并发送 `tool_progress`，模型请求等待期间每 15 秒发送心跳，取消时关闭生成器并取消当前模型任务。摘要输出无效或被模型截断时返回错误，不把部分结果标为完整处理。
+
+最终上下文超限会在日志记录阶段、总预算、系统提示、问题、附加资料和逐条工具消息的字符数，不记录正文、密钥或原始上游响应。启用 `service.context` 的 DEBUG 日志可查看成功组装时的长度分配。
 
 剩余空间用于历史：从最新完整轮次往前选择；遇到条数或字符预算不足就停止，不拆开一轮问答，再恢复正序。
 
@@ -623,7 +630,7 @@ JSON 与 SSE 完成响应均包含 `document_summaries`，每项有 `file_id`、
 
 `calculate` 对所有聊天开放，不要求 query 或文件参数。AST 仅允许十进制数字、科学计数法、括号和算术运算，使用 Fraction 计算 exact，生成 decimal 时使用 Decimal 和 HALF_EVEN 舍入；rounded 表示展示值是否近似。表达式最多 1000 字符、128 个 AST 节点，中间值最多 4096 位二进制位，幂指数为 -100～100 的整数。除零和不支持语法以工具错误回传，不执行代码。
 
-所有工具共用原有调用预算。参数校验和文件范围校验先于实际执行；工具缓存保留列名、工作表名和筛选值的大小写。表格和计算完成后的输入预算为 12000 字符；表格结果按 JSON 字段裁剪展示内容并设置 display_truncated，不裁剪精确计算结果。耗时语义检索和表格分析每 15 秒报告仍在处理的进度。
+所有工具共用原有调用预算。参数校验和文件范围校验先于实际执行；工具缓存保留列名、工作表名和筛选值的大小写。表格和计算完成后的输入预算至少为 16000 字符；表格结果按 JSON 字段裁剪展示内容并设置 display_truncated，不裁剪精确计算结果。耗时语义检索和表格分析每 15 秒报告仍在处理的进度。
 
 自动验证：`.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`。测试使用真实 CSV/XLSX 数据和本地临时存储，模型工具协议和向量使用确定性模拟，不调用真实模型服务或数据库。
 
@@ -907,6 +914,14 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 
 ### 14.1 Swagger 与网页验证清单
 
+网页上下文自动回归测试使用模拟模型、网页抓取和问答保存，不调用外部服务。运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+覆盖长正文、全部分段与末尾信息、大量长链接、多个网页、中间说明超长、统一预算、请求允许的最长问题、部分读取标记、无效摘要、取消清理，以及普通 JSON 和 SSE 接口完成流程。
+
 | 检查项 | 操作 | 预期 |
 | --- | --- | --- |
 | 应用存活 | `GET /health` | 返回 `status=ok` |
@@ -938,7 +953,7 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 | 502 模型认证错误 | DeepSeek 密钥是否有效，是否被系统环境变量中的旧值覆盖 |
 | 429 | 模型或 Tavily 额度、速率限制 |
 | 504 | 网络、代理、上游耗时；模型默认 60 秒、摘要内部 180 秒、搜索 15 秒超时配置 |
-| 通过输入校验却返回 400 上下文过长 | 普通 6000 / 摘要 24000 字符预算还包含系统与工具消息，和 8000 / 60000 API 上限不同 |
+| 通过输入校验却返回 400 上下文过长 | 查看日志的阶段及各部分长度；16000 / 24000 字符预算还包含系统与工具消息，和 8000 / 60000 API 上限不同 |
 | 文件上传成功但回答找不到内容 | 问题词是否匹配、目标页是否有文字、检索片段是否截断或被预算剔除 |
 | 大文件总结不完整 | 确认 Agent 调用了 summarize_document，检查覆盖统计、解析提示与原文；search_documents 仅提供少量片段 |
 | 流式回答最后一次性出现 | 使用的是否为 `/api/chat/stream`；代理或 HTTP 客户端是否缓冲 SSE |

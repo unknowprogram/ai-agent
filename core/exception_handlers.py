@@ -94,7 +94,7 @@ ERROR_SPECS: dict[type[Exception], ErrorSpec] = {
     ),
     ContextTooLargeError: ErrorSpec(
         status.HTTP_400_BAD_REQUEST,
-        "当前问题、系统提示词与工具结果超过上下文预算，请缩短问题。",
+        "问题与参考资料过多，请缩短问题或缩小本次分析范围后重试。",
     ),
     UnsupportedFileError: ErrorSpec(
         status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -141,6 +141,8 @@ ERROR_RESPONSES = {
 def resolve_exception(request: Request, exc: Exception) -> ErrorSpec:
     # 按继承关系查找，保证超时等具体异常优先于 APIError 等父类。
     spec = next(ERROR_SPECS[cls] for cls in type(exc).__mro__ if cls in ERROR_SPECS)
+    if isinstance(exc, ContextTooLargeError) and exc.budget_details:
+        logger.warning("Context budget exceeded: %s", exc.budget_details)
     logger.log(
         logging.ERROR if spec.status_code >= 500 else logging.WARNING,
         "%s %s failed: %s (HTTP %s)",

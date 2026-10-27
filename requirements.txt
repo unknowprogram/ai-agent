@@ -32,3 +32,9 @@ openpyxl
 xlrd
 
 # 精确计算使用标准库 ast、fractions 和 decimal，无需额外依赖
+
+
+# 网页抓取与 HTML 解析
+requests
+beautifulsoup4
+readability-lxml

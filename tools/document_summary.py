@@ -14,9 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 from agent.llm import LLMReply, ask_llm
 from core.exceptions import FileTextUnavailableError, FileTooLargeError, LLMResponseError
 from storage import documents
+from service.context import SUMMARY_CONTEXT_CHARS
 
 SUMMARY_BATCH_CHARS = 12000
-SUMMARY_CONTEXT_CHARS = 24000
 SUMMARY_OUTPUT_TOKENS = 8192
 PROGRESS_INTERVAL = 15
 MAX_MAP_BATCHES = 128

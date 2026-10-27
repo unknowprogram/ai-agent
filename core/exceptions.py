@@ -43,6 +43,10 @@ class ConversationConflictError(RuntimeError):
 class ContextTooLargeError(RuntimeError):
     """系统提示词和当前问题超过上下文预算。"""
 
+    def __init__(self, *, budget_details: dict | None = None):
+        super().__init__("模型输入超过上下文预算。")
+        self.budget_details = budget_details
+
 class UnsupportedFileError(RuntimeError):
     """不支持的文件类型。"""
 

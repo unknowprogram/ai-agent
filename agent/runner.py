@@ -20,6 +20,8 @@ from tools.semantic_search import SEMANTIC_TOOL, SemanticSearchArguments, semant
 from tools.documents import DOCUMENT_TOOL, DocumentSearchArguments, search_documents
 from tools.document_summary import SUMMARY_TOOL, SUMMARY_OUTPUT_TOKENS, DocumentSummaryArguments, SummaryResult, summarize_document
 from tools.web_search import SEARCH_TOOL, SearchArguments, web_search
+from tools.scrape_webpage import SCRAPE_TOOL, ScrapeArguments, read_webpage
+from tools.webpage_summary import WebpageResult
 
 MAX_TOOL_ROUNDS = 2
 MAX_TOOL_CALLS = 3
@@ -29,6 +31,7 @@ TOOL_ARGUMENTS = {
     "web_search": SearchArguments, "search_documents": DocumentSearchArguments,
     "summarize_document": DocumentSummaryArguments, "semantic_search": SemanticSearchArguments,
     "analyze_spreadsheet": SpreadsheetArguments, "calculate": CalculateArguments,
+    "scrape_webpage": ScrapeArguments,
 }
 
 
@@ -45,6 +48,24 @@ async def _tool_events(coroutine, name: str):
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+def _trim_webpage(data: dict) -> bool:
+    """先减少附加链接和标题，再缩减正文；来源 URL 始终保持完整。"""
+    links = data.get("links", [])
+    if links:
+        data["links"] = links[:len(links) // 2]
+        data["links_truncated"] = True
+    elif len(data.get("title", "")) > 100:
+        title = data["title"]
+        data["title"] = title[:max(100, len(title) // 2)]
+    elif len(data.get("content", "")) > 100:
+        content = data["content"]
+        data["content"] = content[:max(100, len(content) // 2)]
+    else:
+        return False
+    data["truncated"] = True
+    return True
 
 
 def _trim_spreadsheet(data: dict) -> bool:
@@ -129,6 +150,13 @@ def _fit_messages(build_messages: Callable, tool_messages: list[dict], searched:
             return build_messages(tool_messages, searched)
         except ContextTooLargeError:
             changed = False
+            # 中间说明不是最终答案；保留 tool_calls 以维持工具调用协议。
+            for message in tool_messages:
+                if message["role"] == "assistant" and message.get("tool_calls") and message.get("content"):
+                    message["content"] = None
+                    changed = True
+            if changed:
+                continue
             for message in tool_messages:
                 if message["role"] != "tool":
                     continue
@@ -137,10 +165,18 @@ def _fit_messages(build_messages: Callable, tool_messages: list[dict], searched:
                     message["content"] = _json(data)
                     changed = True
                     break
+                # 网页抓取结果使用顶层 content，而搜索/文档结果使用 results。
+                if data.get("source_type") == "webpage":
+                    if _trim_webpage(data):
+                        message["content"] = _json(data)
+                        changed = True
+                        break
+                    continue
+
                 results = data.get("results", [])
                 if not results:
                     continue
-                longest = max(results, key=lambda item: len(item["content"]))
+                longest = max(results, key=lambda item: len(item.get("content", "")))
                 if len(longest["content"]) > 100:
                     longest["content"] = longest["content"][:len(longest["content"]) // 2]
                 else:
@@ -159,6 +195,7 @@ async def run_agent(
     file_ids: list[str] | None = None,
     file_metadata: list[dict] | None = None,
     is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+    question: str = "",
 ) -> AsyncIterator[tuple[str, dict | AgentResult]]:
     tool_messages = []
     sources = []
@@ -183,6 +220,7 @@ async def run_agent(
         if within_budget and search_mode is not False:
             tools.append(SEARCH_TOOL)
         if within_budget:
+            tools.append(SCRAPE_TOOL)
             tools.append(CALCULATE_TOOL)
             if text_file_ids:
                 tools.extend([DOCUMENT_TOOL, SUMMARY_TOOL, SEMANTIC_TOOL])
@@ -221,7 +259,7 @@ async def run_agent(
             if total_usage is None:
                 total_usage = {key: 0 for key in answer.usage}
             for key, value in answer.usage.items():
-                total_usage[key] += value
+                total_usage[key] = total_usage.get(key, 0) + value
         if not answer.tool_calls:
             if not answer.reply.strip():
                 raise LLMResponseError()
@@ -261,7 +299,11 @@ async def run_agent(
                         if requested_id and str(requested_id) not in scope:
                             data = {"error": "该文件不在当前会话范围，只能使用系统提供的文件清单。"}
             if data is None:
-                query = getattr(arguments, "query", None) or getattr(arguments, "expression", None)
+                query = (
+                        getattr(arguments, "query", None)
+                        or getattr(arguments, "expression", None)
+                        or getattr(arguments,"url",None)
+                )
                 if query is None:
                     query = metadata[str(arguments.file_id)]["filename"] + " / " + arguments.operation
                 yield "tool_start", {"name": call.name, "query": query, "reset": False}
@@ -332,12 +374,39 @@ async def run_agent(
                 elif key in seen_queries:
                     results = seen_queries[key]
                 else:
-                    if call.name == "web_search":
-                        results = await web_search(query, arguments.max_results)
-                    else:
-                        scope = [str(arguments.file_id)] if arguments.file_id else text_file_ids
-                        results = await search_documents(query, scope, arguments.limit)
-                    seen_queries[key] = results
+                    try:
+                        if call.name == "web_search":
+                            results = await web_search(query, arguments.max_results)
+                        elif call.name == "scrape_webpage":
+                            page = None
+                            async with aclosing(read_webpage(arguments.url, question)) as events:
+                                async for event_name, event_data in events:
+                                    if is_disconnected and await is_disconnected():
+                                        return
+                                    if event_name == "progress":
+                                        yield "tool_progress", event_data
+                                    else:
+                                        page = event_data
+                            if not isinstance(page, WebpageResult):
+                                raise LLMResponseError()
+                            results = page.data
+                            if page.usage:
+                                if total_usage is None:
+                                    total_usage = {}
+                                for item, value in page.usage.items():
+                                    total_usage[item] = total_usage.get(item, 0) + value
+                        else:
+                            scope = [str(arguments.file_id)] if arguments.file_id else text_file_ids
+                            results = await search_documents(query, scope, arguments.limit)
+                        seen_queries[key] = results
+                    except ValueError as exc:
+                        data = {"error": str(exc)[:300], "name": call.name}
+                        tool_messages.append({
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": _json(data),
+                        })
+                        continue
                 if call.name == "web_search":
                     searched = True
                     for source in results:
@@ -347,9 +416,21 @@ async def run_agent(
                         {"title": item["title"][:200], "url": item["url"], "content": item["content"][:1000]}
                         for item in results
                     ]}
+                elif call.name == "scrape_webpage":
+                    data = results
+                    # 将实际抓取的网页作为来源返回给客户端，避免把网页正文误当作搜索摘要。
+                    source = {
+                        "title": str(results.get("title", ""))[:200],
+                        "url": str(results.get("url", arguments.url)),
+                        "content": str(results.get("content", ""))[:1000],
+                    }
+                    if source["url"] and not any(
+                        item.get("url") == source["url"] for item in sources
+                    ):
+                        sources.append(source)
                 elif call.name == "search_documents":
                     data = {"source_type": "document", "query": query, "results": results}
             tool_messages.append({"role": "tool", "tool_call_id": call.id, "content": _json(data)})
-            if "results" in data:
+            if "results" in data or data.get("source_type") == "webpage":
                 yield "sources", {"sources": sources, "searched": searched, "document_sources": _document_sources(tool_messages), "document_summaries": _document_summaries(tool_messages)}
     raise LLMResponseError()

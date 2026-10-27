@@ -677,6 +677,7 @@
             analyze_spreadsheet: '正在分析表格',
             calculate: '正在精确计算',
             web_search: '正在搜索网页',
+            scrape_webpage: '正在阅读网页',
           };
           const prefix = prefixes[data.name] || '正在处理工具';
           const label = typeof data.query === 'string' && data.query ? `${prefix}：${data.query}` : '正在准备查询资料……';
