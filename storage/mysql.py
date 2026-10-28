@@ -30,7 +30,7 @@ def get_connection():
         raise DatabaseConfigError() from exc
     try:
         return pymysql.connect(
-            host=_setting("MYSQL_HOST", "DB_HOST", "127.0.0.1"),
+            host=_setting("MYSQL_HOST", "DB_HOST", "111.229.181.165"),
             port=port,
             user=_setting("MYSQL_USER", "DB_USER", "agent_user"),
             password=_setting("MYSQL_PASSWORD", "DB_PASSWORD", ""),
