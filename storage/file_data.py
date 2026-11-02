@@ -1,4 +1,5 @@
-"""保存表格原文件；数据库继续管理文件元数据和会话关联。"""
+# 原说明：保存表格原文件；数据库继续管理文件元数据和会话关联。
+"""保存表格和图片原文件；数据库继续管理元数据及会话关联。"""
 
 import os
 from pathlib import Path
@@ -39,6 +40,7 @@ def save_file_data(file_id: str, raw: bytes) -> None:
 def get_file_data(file_id: str) -> bytes:
     try:
         with _path(file_id).open("rb") as stream:
+
             raw = stream.read(MAX_FILE_BYTES + 1)
     except FileNotFoundError as exc:
         raise FileDataUnavailableError() from exc

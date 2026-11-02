@@ -1,6 +1,10 @@
 
 # 大模型 API
 openai
+# LangChain 消息/工具接口、OpenAI 兼容模型适配，以及 LangGraph 状态图
+langchain-core>=1,<2
+langchain-openai>=1,<2
+langgraph>=1,<2
 
 # 环境变量
 python-dotenv
@@ -17,6 +21,9 @@ pymysql
 
 # 文件上传
 python-multipart
+
+# 图片格式校验、EXIF 方向校正与缩放
+Pillow>=10.0
 
 # PDF / Word 文档解析
 pypdf

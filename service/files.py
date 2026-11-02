@@ -17,6 +17,7 @@ from core.exceptions import (
     UnsupportedFileError,
 )
 from storage import documents
+from service.images import IMAGE_SUFFIXES, IMAGE_TYPES, inspect_image
 
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -229,6 +230,37 @@ def parse_file(
         raise FileParseError() from exc
 
 
+# ===== 原实现：仅文档 / 表格上传，保留注释供对比 =====
+# async def ingest_file(filename: str, raw: bytes) -> dict:
+#     filename = filename.replace("\\", "/").split("/")[-1]
+#     filename = filename.strip() or "未命名文件"
+#     if len(filename) > 255:
+#         suffix = Path(filename).suffix
+#         filename = filename[:255 - len(suffix)] + suffix
+# 
+#     file_type, chunks, char_count, warnings = await asyncio.to_thread(
+#         parse_file,
+#         filename,
+#         raw,
+#     )
+# 
+#     file_id = await asyncio.to_thread(
+#         documents.save_document,
+#         filename,
+#         file_type,
+#         char_count,
+#         chunks,
+#         warnings,
+#         raw if file_type in {"xlsx", "xls", "csv"} else None,
+#     )
+# 
+#     return await asyncio.to_thread(
+#         documents.get_document,
+#         file_id,
+#     )
+
+
+# ===== 当前实现：增加静态图片上传 =====
 async def ingest_file(filename: str, raw: bytes) -> dict:
     filename = filename.replace("\\", "/").split("/")[-1]
     filename = filename.strip() or "未命名文件"
@@ -236,23 +268,28 @@ async def ingest_file(filename: str, raw: bytes) -> dict:
         suffix = Path(filename).suffix
         filename = filename[:255 - len(suffix)] + suffix
 
-    file_type, chunks, char_count, warnings = await asyncio.to_thread(
-        parse_file,
-        filename,
-        raw,
-    )
+    suffix = Path(filename).suffix.lower()
 
+    if suffix in IMAGE_SUFFIXES:
+        # 图片不走文本文档解析，空文本块不会影响现有文件关联流程。
+        info = await asyncio.to_thread(inspect_image, raw)
+        file_type = info.file_type
+        chunks = []
+        char_count = 0
+        warnings = [
+            f"已保存图片：{info.width} × {info.height} 像素。",
+            "上传阶段仅校验图片；发送问题后由视觉模型分析，识别内容可能有误。",
+        ]
+    else:
+        # 原有 TXT / PDF / Word / 表格解析流程保持复用。
+        file_type, chunks, char_count, warnings = await asyncio.to_thread(
+            parse_file, filename, raw,
+        )
+
+    save_raw = file_type in IMAGE_TYPES or file_type in {"xlsx", "xls", "csv"}
     file_id = await asyncio.to_thread(
         documents.save_document,
-        filename,
-        file_type,
-        char_count,
-        chunks,
-        warnings,
-        raw if file_type in {"xlsx", "xls", "csv"} else None,
+        filename, file_type, char_count, chunks, warnings,
+        raw if save_raw else None,
     )
-
-    return await asyncio.to_thread(
-        documents.get_document,
-        file_id,
-    )
+    return await asyncio.to_thread(documents.get_document, file_id)

@@ -9,6 +9,10 @@ class LLMResponseError(RuntimeError):
     """模型没有返回可展示的文本。"""
 
 
+class VisionConfigError(RuntimeError):
+    """SenseNova 视觉模型配置缺失或无效。"""
+
+
 class SearchError(RuntimeError):
     """搜索服务连接失败或返回无效结果。"""
 

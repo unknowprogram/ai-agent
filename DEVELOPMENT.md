@@ -1,6 +1,8 @@
 # 企业智能助手开发文档
 
-本文基于 2026-10-26 项目代码整理，说明当前实现、每个源码文件的职责、技术选型、运行方式和扩展入口。页面品牌为“知序”，FastAPI 应用名称为“智能助手”。代码变更后，应同步更新本文对应章节。
+本文更新至 2026-11-02 的 LangChain / LangGraph 迁移，说明当前实现、每个源码文件的职责、技术选型、运行方式和扩展入口。页面品牌为“知序”，FastAPI 应用名称为“智能助手”。代码变更后，应同步更新本文对应章节。
+
+迁移对照保存在 `agent/llm.py` 和 `agent/runner.py` 的“迁移前实现”注释块中，新实现位于同文件的“当前实现”标记之后。模型通过 LangChain 调用；模型与工具之间的路由由 LangGraph 接管；MySQL 继续负责会话历史，不使用图 checkpoint 代替业务会话存储。
 
 ## 目录
 
@@ -29,7 +31,7 @@
 
 | 能力 | 实现方式 |
 | --- | --- |
-| 普通聊天 | 调用 DeepSeek 兼容 OpenAI 的 Chat Completions API |
+| 普通聊天 | LangChain `ChatOpenAI` 调用 DeepSeek 兼容 OpenAI 的 Chat Completions API |
 | 流式回答 | 后端返回 SSE，网页逐段追加模型正文 |
 | 多轮会话 | MySQL 持久化问答，后续通过 `conversation_id` 恢复最近历史 |
 | 会话管理 | 创建、列出、读取、删除会话 |
@@ -42,7 +44,7 @@
 | 输入与异常管理 | Pydantic 校验、统一业务异常、统一 HTTP 状态码 |
 | 开发调试 | FastAPI 自动生成 Swagger 和 OpenAPI |
 
-当前执行顺序为：读取记忆 → 校验文件范围并提供清单 → 组装上下文 → 模型自主决定回答或调用工具 → 回传工具结果并继续调用模型 → 保存最终问答。`agent/runner.py` 开放 `web_search`、`scrape_webpage`、`search_documents`、`summarize_document`、`semantic_search`、`analyze_spreadsheet` 和 `calculate`，按服务端文件类型提供工具，共享最多 2 轮、合计 3 次调用的外层预算。网页及文档摘要内部的分段读取、归纳和合并在一次工具调用中完成。未单独处理或展示模型的 `reasoning_content`。
+当前执行顺序为：读取记忆 → 校验文件范围并提供清单 → 组装上下文 → 模型自主决定回答或调用工具 → 回传工具结果并继续调用模型 → 保存最终问答。`agent/runner.py` 适配图事件；`agent/graph.py` 执行模型和工具节点；`agent/tool_registry.py` 注册 `web_search`、`scrape_webpage`、`search_documents`、`summarize_document`、`semantic_search`、`analyze_spreadsheet` 和 `calculate`。按服务端文件类型提供工具，共享最多 2 轮、合计 3 次调用的外层预算。网页及文档摘要内部的分段读取、归纳和合并在一次工具调用中完成。未单独处理或展示模型的 `reasoning_content`。
 
 ## 2. 技术栈
 
@@ -52,7 +54,10 @@
 | FastAPI | Web 框架 | 路由、依赖参数解析、响应模型、Swagger、静态文件服务 |
 | Uvicorn | ASGI 服务 | 本地运行和开发自动重载 |
 | Pydantic v2 | 数据结构与校验 | `BaseModel`、`ConfigDict`、`model_validator` 等；由 FastAPI 依赖引入 |
-| `openai` | 模型客户端 | 使用 `AsyncOpenAI` 连接 DeepSeek，支持普通和流式请求 |
+| `openai` | 底层模型客户端 | 提供兼容接口及异常类型，由适配器管理每次请求的连接和响应流生命周期 |
+| `langchain-core` | 消息与工具接口 | 转换消息结构，注册带 Pydantic 参数模型的 `StructuredTool` |
+| `langchain-openai` | LangChain 模型适配 | 使用 `ChatOpenAI.ainvoke()` / `astream()` 调用 DeepSeek，保留 JSON 模式与用量 |
+| `langgraph` | Agent 流程编排 | `model` 与 `tools` 节点、条件路由、每次请求独立状态、自定义进度与正文事件 |
 | DeepSeek | 大语言模型 | 默认模型 `deepseek-chat`，接口地址和模型可配置 |
 | `python-dotenv` | 配置加载 | 从根目录 `.env` 读取配置 |
 | MySQL / InnoDB | 持久化存储 | 会话、消息、文档元数据、分块、会话文档关联 |
@@ -82,7 +87,10 @@ ai-agent/
 ├── agent/
 │   ├── __init__.py
 │   ├── llm.py                 # 模型调用
-│   ├── runner.py              # 自主搜索工具循环
+│   ├── runner.py              # 图事件与原服务接口的适配
+│   ├── graph.py               # 模型/工具节点、条件边和业务预算
+│   ├── state.py               # 图状态与服务端请求上下文
+│   ├── tool_registry.py       # LangChain 工具注册及范围注入
 │   └── prompts.py             # 系统提示词
 ├── core/
 │   ├── __init__.py
@@ -122,9 +130,6 @@ ai-agent/
 │   ├── semantic_search.py     # 本地模型向量检索
 │   ├── analyze_spreadsheet.py # Excel/CSV 完整数据分析
 │   └── calculate.py           # 有理数精确计算
-├── tests/
-│   ├── test_webpage_context.py # 预算、裁剪与 Agent 流程
-│   └── test_webpage_summary.py # 全部分段、末尾覆盖与 HTTP/SSE 验证
 └── static/
     ├── index.html             # 页面结构
     ├── styles.css             # 页面样式
@@ -171,13 +176,18 @@ flowchart TD
 | 文件 | 关键代码 | 职责与实现细节 |
 | --- | --- | --- |
 | [agent/__init__.py](agent/__init__.py) | 包初始化文件 | 标识 `agent` 包，不承担聊天业务 |
-| [agent/llm.py](agent/llm.py) | `ToolCall`、`LLMReply`、`ask_llm()`、`stream_llm()` | 封装普通与流式模型请求、工具定义、工具调用及 Token 用量；流式累积工具名称和 JSON 参数片段 |
-| [agent/runner.py](agent/runner.py) | `TOOL_ARGUMENTS`、`AgentResult`、`run_agent()` | 选择当前可用的网页 / 文档工具，执行白名单和参数校验，限制次数，缓存本轮查询并回传结果 |
+| [agent/llm.py](agent/llm.py) | `ToolCall`、`LLMReply`、`ask_llm()`、`stream_llm()` | LangChain 模型适配、原结果结构兼容、JSON 模式、分段工具参数合并、响应流显式关闭 |
+| [agent/runner.py](agent/runner.py) | `run_agent()`、导出的 `AgentResult` | 构造服务端请求上下文，将图的 custom / updates 输出转换为原事件元组 |
+| [agent/graph.py](agent/graph.py) | `model_node()`、`tools_node()`、`route_after_model()`、`AGENT_GRAPH` | 组装输入、模型决策、顺序执行工具、校验、预算、缓存、用量与来源 |
+| [agent/state.py](agent/state.py) | `AgentState`、`AgentContext`、`AgentResult`、`initial_state()` | 分离本轮可变状态与服务端配置，每次请求创建独立容器，定义两轮三次调用预算 |
+| [agent/tool_registry.py](agent/tool_registry.py) | `build_tools()` | 注册 `StructuredTool`，复用原描述、参数模型和业务函数，注入文件范围、问题与进度回调 |
 | [agent/prompts.py](agent/prompts.py) | `SYSTEM_PROMPT` | 集中维护助手角色、处理任务、证据使用和输出要求；提示词描述能力不等于代码已经实现能力 |
 | [tools/documents.py](tools/documents.py) | `DOCUMENT_TOOL`、`DocumentSearchArguments`、`available_documents()`、`search_documents()`、`retrieve()` | 提供文件清单；只在 Agent 调用工具后加载指定范围的分块，按关键词与中文相邻双字评分并选取片段 |
 | [tools/document_summary.py](tools/document_summary.py) | `SUMMARY_TOOL`、`DocumentSummaryArguments`、`summarize_document()`、`SummaryResult` | 完整读取已提取正文，定位章节、分段归纳、逐级合并，返回覆盖统计、进度和内部模型用量 |
 
 `agent/llm.py` 每次调用使用异步上下文管理器创建和关闭客户端；默认超时 60 秒，最多重试一次，输出上限 `max_tokens=2048`。摘要分段归纳与中间合并提高到 4096，最终摘要及外层综合回答为 8192。摘要内部单次请求超时 180 秒，不自动重试网络错误，等待期间每 15 秒报告进度。`LLMReply` 保留 `finish_reason`。正文和工具调用同时为空会转换为 `LLMResponseError`。有效工具调用要求 `tool_calls` 结束原因；不完整或截断的工具参数不会执行。普通正文允许 `stop` 或 `length`；摘要分段及中间合并输出截断时缩小输入重试，最终回答截断则报错，不保存未完成的回答。工具循环累计外层及摘要内部各次调用的 Token 用量。当前适配默认的 `deepseek-chat`，未处理独立思考字段。
+
+图只执行模型与工具过程，历史读取和最终数据库提交仍在 `service/chat.py` 中完成。`model → tools → model` 通过条件边循环；工具预算耗尽后取消工具绑定并生成最终回答。`recursion_limit` 仅作为图执行步数的额外保护，不能替代业务调用预算。流式模式只转发 custom 的正文、工具开始、进度和来源，完整结果从节点成功完成后的 updates 读取，因此摘要内部模型的 token 不会混入主回答。
 
 ### 4.3 `core/`：异常与全局处理
 
@@ -254,7 +264,6 @@ flowchart TD
 | [tools/analyze_spreadsheet.py](tools/analyze_spreadsheet.py) | `SPREADSHEET_TOOL`、`analyze_spreadsheet_file()` | 读取原始工作簿，校验规模，支持工作表清单、预览、概况、等值筛选、分组和排序 |
 | [tools/calculate.py](tools/calculate.py) | `CALCULATE_TOOL`、`calculate()` | AST 白名单解析表达式，使用 Fraction 保留精确值，使用 Decimal 生成展示小数 |
 | [storage/file_data.py](storage/file_data.py) | `save_file_data()`、`get_file_data()` | 原子写入 `.data/files/<UUID>.bin`；元数据事务失败时清理本次原文件 |
-| [tests/test_extended_tools.py](tests/test_extended_tools.py) | unittest 测试 | 覆盖实际 CSV/XLSX 读取、精确计算、文件存储、上传接口和模拟模型工具协议 |
 
 `_search()` 是同步 HTTP 请求；`web_search()` 校验参数与密钥后，通过 `asyncio.to_thread()` 调用它，避免阻塞异步事件循环。
 
@@ -564,8 +573,9 @@ flowchart LR
 | PDF | `pypdf.PdfReader` 提取各页文字 | 保留“第 N 页”；无文字页记入警告，不做 OCR；加密时仅尝试空密码解密 |
 | DOCX | 读取 ZIP 结构后，通过 `iter_inner_content()` 按顺序提取段落与表格 | 表格单元格使用 ` | ` 连接；位置为“正文”；没有排版渲染，因此不提供推测页码 |
 | XLSX / XLS / CSV | pandas 配合 openpyxl / xlrd 读取完整工作簿 | 上传预览只含表头和前 5 行，原文件保留用于完整分析；位置为工作表名称 |
+| JPG / JPEG / PNG / WebP | Pillow 校验静态图片并保存原图；聊天时通过 SenseNova 识别 | 不生成原文文本块；识别结果明确标注为模型输出 |
 
-图片、扫描件 OCR、旧版 DOC 尚未实现。PDF 全部提取不到文字会返回错误；混合 PDF 可保留有文字页面，并返回其他页面的警告。
+扫描 PDF 自动 OCR、视频、动画和旧版 DOC 尚未实现。独立静态图片可通过 `analyze_image` 识别；PDF 全部提取不到文字仍会返回错误，混合 PDF 可保留有文字页面并返回其他页面的警告。
 
 ### 9.3 限制与分块
 
@@ -632,7 +642,17 @@ JSON 与 SSE 完成响应均包含 `document_summaries`，每项有 `file_id`、
 
 所有工具共用原有调用预算。参数校验和文件范围校验先于实际执行；工具缓存保留列名、工作表名和筛选值的大小写。表格和计算完成后的输入预算至少为 16000 字符；表格结果按 JSON 字段裁剪展示内容并设置 display_truncated，不裁剪精确计算结果。耗时语义检索和表格分析每 15 秒报告仍在处理的进度。
 
-自动验证：`.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`。测试使用真实 CSV/XLSX 数据和本地临时存储，模型工具协议和向量使用确定性模拟，不调用真实模型服务或数据库。
+### 9.8 SenseNova 视觉工具
+
+新增 `service/images.py`、`agent/vision.py`、`tools/analyze_image.py`，依次负责图片预处理、独立视觉模型调用及文件工具封装。`SENSENOVA_API_KEY`、`SENSENOVA_BASE_URL`、`SENSENOVA_MODEL` 与主对话模型配置独立；SDK 根地址为 `https://token.sensenova.cn/v1`，也兼容配置末尾带 `/chat/completions` 的完整地址。默认请求超时 180 秒，输出上限 2048 Token，分别可用 `SENSENOVA_TIMEOUT`、`SENSENOVA_MAX_TOKENS` 配置。
+
+上传图片在 Pillow 完整解码后保存实际格式元数据和原始字节，文本字符数及块数为 0。请求前校正 EXIF 方向，最长边按比例缩至 2048 像素，透明区域铺白底并转为 JPEG Data URL。单图 20 MiB、2400 万像素为项目限制；动画拒绝上传，不默认只读取第一帧。
+
+`AgentContext.image_file_ids` 保存当前会话的图片范围，runner 根据服务端元数据分类。注册表只在有图片时开放 `analyze_image`，参数为 UUID `file_id` 和 1–400 字符 `query`。图节点和工具适配器均校验文件范围，读取原图后只向视觉模型发送当前问题及图片。Base64 不进入工具结果或 MySQL 会话历史。异步 SDK 连接由本次调用拥有，取消时关闭；等待过程中沿用每 15 秒的工具心跳。
+
+`ImageAnalysisResult` 返回 `source_type=image`、模型名、实际发送尺寸和 `results`，用量累计时只计算第一次执行，缓存命中不重复累加。`results` 复用现有来源 Schema，`chunk_index=1` 是识别结果编号，`location` 为“图片视觉识别（模型输出）”。主模型根据结果生成最终答案；上下文预算为 24000 字符，输出裁剪和图片缩小须按标记说明。视觉模型空响应、输出截断或异常工具请求均按模型响应错误处理；缺少视觉配置单独提示检查 SenseNova 设置。
+
+前端扩展选择与粘贴图片的格式校验，上传阶段提示“校验图片”，发送后显示“正在识别图片”。上传、聊天、SSE 和文件关联接口沿用现有协议，不需要修改 SQL 表结构。部署时仍需保存 MySQL 和 `.data/files/`。
 
 ## 10. 联网搜索
 
@@ -912,15 +932,9 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 
 ## 14. 手动验证与排查
 
+迁移使用的依赖版本为 `langchain-core` / `langchain-openai` 1.7.3、`langgraph` 1.2.19。
+
 ### 14.1 Swagger 与网页验证清单
-
-网页上下文自动回归测试使用模拟模型、网页抓取和问答保存，不调用外部服务。运行：
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-```
-
-覆盖长正文、全部分段与末尾信息、大量长链接、多个网页、中间说明超长、统一预算、请求允许的最长问题、部分读取标记、无效摘要、取消清理，以及普通 JSON 和 SSE 接口完成流程。
 
 | 检查项 | 操作 | 预期 |
 | --- | --- | --- |
@@ -973,7 +987,7 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 | 优化检索 | `tools/documents.py`；必要时扩展 `storage/documents.py` | 可加入更好的分词、BM25、向量、重排；需要索引更新和已有文档重建方案 |
 | 全文总结 | `tools/document_summary.py`、`agent/runner.py`、`service/chat.py` | 已实现完整正文扫描 → 分段归纳 → 逐级合并；调整批次和预算时验证尾部覆盖与异常处理 |
 | 新增搜索参数 | `schemas/search.py`、`tools/web_search.py`、`service/chat.py` | 聊天搜索和独立搜索需共同考虑 |
-| 新增 Agent 工具 | `agent/runner.py`、`agent/llm.py` 和新工具模块 | 增加工具定义、参数校验和白名单分发，保留迭代上限和结果回传 |
+| 新增 Agent 工具 | `agent/tool_registry.py`、`agent/graph.py` 和新工具模块 | 注册参数模型与适配器，按文件类型开放工具，保留预算、范围校验、进度和结果回传 |
 | 新增 HTTP 接口 | `schemas/` → `service/` / `storage/` → `router/` → `main.py` | 复用异常映射和接口模型 |
 | 修改错误提示或状态码 | `core/exception_handlers.py` | 保持普通响应、Swagger、SSE 错误一致 |
 | 修改表结构 | `agent_db.sql` 加上实际迁移步骤 | 更新初始化文件不能自动升级已经存在的表 |

@@ -9,6 +9,7 @@ MAX_INPUT_CHARS = 16000  # 容纳接口允许的 8000 字符问题及系统规�
 WEBPAGE_CONTEXT_CHARS = 24000  # 搜索和网页阅读的统一预算
 STRUCTURED_CONTEXT_CHARS = 16000  # 表格统计、精确计算至少使用基础预算
 SUMMARY_CONTEXT_CHARS = 24000  # 文档摘要综合回答的预算
+VISION_CONTEXT_CHARS = 24000  # 图片识别结果与最终回答的预算
 MAX_HISTORY_MESSAGES = 20  #  设置最大历史消息数
 MAX_SUMMARY_CHARS = 3000  # 设置最大摘要字符数
 MAX_REFERENCE_COUNT = 5  # 设置最大引用数量
@@ -35,6 +36,8 @@ def context_budget(tool_messages: list[dict] | None = None, searched: bool = Fal
         budget = max(budget, STRUCTURED_CONTEXT_CHARS)
     if "document_summary" in source_types:
         budget = max(budget, SUMMARY_CONTEXT_CHARS)
+    if "image" in source_types or "analyze_image" in tool_names:
+        budget = max(budget, VISION_CONTEXT_CHARS)
     return budget
 
 # 将扁平的聊天历史记录（history）按对话轮次（一问一答）进行分组，并且只保留包含“助手完整回复”的有效轮次
@@ -165,6 +168,16 @@ def build_context(
           "历史摘要可能存在遗漏，以当前问题和原始对话为准。"
         + "\n当前用户消息的‘本条问题附带的文件’表示本轮新提交的附件；"
           "用户说‘这个文件’时优先检索这些文件，不能仅凭文件名猜测正文。"
+    )
+    # 在计算预算之前加入视觉规则，确保系统提示也计入输入长度。
+    system += (
+        "\n图片文件使用 analyze_image 分析，不能使用文档检索工具读取图片内容。"
+        "涉及图片内容的问题，必须先取得真实视觉工具结果再回答；文件名和元数据不代表图片内容。"
+        "图片视觉识别结果是模型输出，不能当成已经提取或核实的原文文本块。"
+        "识别不清楚的文字、数字或细节应明确说明，不能猜测。"
+        "image.resized=true 表示图片已缩小，小字和细节可能无法辨认。"
+        "truncated=true 表示工具结果已被裁剪，不能声称完整展示了识别内容。"
+        "引用视觉结果时注明文件名和‘图片视觉识别（模型输出）’。"
     )
     tool_messages = tool_messages or []
     original_budget = max_input_chars

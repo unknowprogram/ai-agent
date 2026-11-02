@@ -2,6 +2,10 @@
 
 基于 FastAPI 和 DeepSeek 的聊天服务，支持文件上传问答、MySQL 会话记忆、多轮上下文、Tavily 联网搜索和 API 文档。
 
+当前模型层使用 LangChain `ChatOpenAI`，Agent 流程使用 LangGraph 的 `model → tools → model` 状态图。前端、HTTP/SSE 接口和 MySQL 会话机制保持兼容。
+
+迁移对照：`agent/llm.py` 和 `agent/runner.py` 文件顶部完整保留旧实现的逐行注释，新实现从“当前实现”标记开始。新增的 `agent/graph.py`、`agent/state.py` 和 `agent/tool_registry.py` 分别负责节点路由、本轮状态和工具适配，并附有中文说明。
+
 完整的项目结构、逐文件代码职责、技术栈、数据库与接口说明见 [开发文档](DEVELOPMENT.md)。
 
 ## 启动
@@ -187,7 +191,10 @@ MySQL 同步操作在线程中执行，聊天生成期间不占用数据库连�
 - `core/exception_handlers.py`：异常到状态码、提示文案的映射及全局处理器注册。
 - `schemas/error.py`：业务和模型错误响应结构。
 - `service/chat.py`：组装上下文，协调 Agent 执行和最终问答保存。
-- `agent/runner.py`：模型自主调用网页和文档工具，校验参数、限制次数并收集来源。
+- `agent/runner.py`：LangGraph 事件适配器，保持服务层原有的 `run_agent()` 调用接口。
+- `agent/graph.py`：模型与工具节点、条件路由、参数及文件范围校验、工具预算、缓存、来源和用量。
+- `agent/state.py`：图状态、请求上下文、最终结果及断开连接信号。
+- `agent/tool_registry.py`：将原工具注册成 LangChain `StructuredTool`，注入会话文件范围和摘要进度。
 - `service/context.py`：统一控制模型输入的字符预算及参考资料。
 - `service/files.py`：提取 TXT、MD、PDF、DOCX 文字并分块。
 - `storage/documents.py`：文件元数据、分块和会话文件查询。
@@ -199,7 +206,7 @@ MySQL 同步操作在线程中执行，聊天生成期间不占用数据库连�
 - `tools/web_search.py`：调用 Tavily，处理网络异常并提取网页标题、链接及摘要。
 - `tools/scrape_webpage.py`：校验 URL、读取 HTML、提取正文并报告网页阅读进度。
 - `tools/webpage_summary.py`：长网页分段归纳、逐级合并、有界结果与覆盖范围。
-- `agent/llm.py`：普通及流式异步模型调用，默认 60 秒超时、最多一次重试；支持摘要的 JSON 模式及独立输出、超时配置。
+- `agent/llm.py`：LangChain 普通及流式模型调用，保留原结果结构、默认超时、重试以及摘要的 JSON 模式；停止接收时显式关闭响应流。
 - `agent/prompts.py`：现有的企业 Agent 系统提示词。
 - `static/index.html`：聊天页面结构。
 - `static/styles.css`：页面样式和移动端适配。
@@ -248,6 +255,26 @@ MySQL 同步操作在线程中执行，聊天生成期间不占用数据库连�
 聊天接口会调用真实模型，需要有效的 DeepSeek 配置和网络连接，并可能产生模型费用。
 联网搜索还会使用 Tavily 账户额度；可先用 `/api/search` 验证搜索，再直接向 Agent 提问最新信息。
 `GET /health` 可用于检查服务是否启动，不调用模型。
+
+## SenseNova 图片理解
+
+主对话继续使用现有 DeepSeek 配置，图片理解通过独立的 SenseNova 模型完成。在 `.env` 中配置：
+
+```dotenv
+SENSENOVA_API_KEY=你的SenseNova密钥
+SENSENOVA_MODEL=sensenova-6.8-flash-lite
+SENSENOVA_BASE_URL=https://token.sensenova.cn/v1
+SENSENOVA_TIMEOUT=180
+SENSENOVA_MAX_TOKENS=2048
+```
+
+安装 `requirements.txt` 中的 Pillow 依赖并重启服务。前端可选择或粘贴 JPG、JPEG、PNG、WebP 静态图片，再发送“读取这张图片中的文字”等问题。上传阶段只校验和保存图片，发送问题后才由 Agent 调用 `analyze_image(file_id, query)`。接口继续使用 `POST /api/files` 上传，再将返回的 ID 放入聊天请求的 `file_ids`；成功绑定后可携带 `conversation_id` 追问。
+
+`service/images.py` 负责实际格式校验、EXIF 方向校正、白底 JPEG 转换及缩放；`agent/vision.py` 通过 LangChain 调用 SenseNova；`tools/analyze_image.py` 读取当前会话图片并返回识别结果。工具沿用 `StructuredTool.from_function()` 注册，使用现有 LangGraph 工具节点、范围校验、缓存、取消处理和 15 秒心跳。视觉模型用量计入最终 `usage`；多模型 Token 合计不代表费用相同。
+
+本项目限制单张图片为 20 MiB、2400 万像素，发送前最长边缩至 2048 像素；这些是项目资源限制。图片原文件与表格一起保存在 `.data/files/<文件UUID>.bin`，元数据和会话关联仍由 MySQL 管理，图片的 `char_count` 和 `chunk_count` 为 0。识别结果通过 `document_sources` 返回，位置标明“图片视觉识别（模型输出）”，不是原文文本块。图片问题使用 24000 字符上下文预算，仍共享每轮 2 轮、合计 3 次工具调用上限。
+
+此版本处理独立静态图片，不自动识别 PDF 内嵌图片、视频或动画。小字和压缩后的细节可能无法辨认；扫描 PDF 可先转为图片上传。数据库或模型服务不可用时仍按现有异常机制返回错误，缺少视觉配置时提示检查 `SENSENOVA_*`。
 
 ## 文件上传与问答
 
@@ -301,7 +328,7 @@ DOCX 解压后大小不超过 100 MiB、压缩条目不超过 2000 个。
 工具只访问服务端校验后的当前会话文件，未调用时不读取正文分块。所有工具共享每轮最多 2 轮、合计 3 次调用的外层预算；摘要内部的模型调用在一次工具执行中完成，用量累计到本轮 `usage`。摘要最多 128 个读取批次、8 层合并；分段归纳与中间合并最多 4096 Token，最终摘要及综合回答最多 8192 Token。分段或中间合并输出截断时自动缩小当前输入后重试，完整保留文字和摘要要点；超过处理上限、不能继续拆分、最终输出截断或结果格式异常时返回错误，不把未完成处理显示为完整摘要。
 普通及流式完成响应的 `document_summaries` 包含文件名、查询范围、摘要、相关主题和 `coverage`（已处理 / 总片段数、批次数、起止位置、`all_extracted_text_scanned`、解析提示）。页面仅缓存展示所需元数据；数据库仍只保存最终问答。完整扫描指全部已提取文字，不含未提取的扫描页或图片，也不保证模型归纳毫无遗漏。
 
-数据库保存提取后的文本、分块和文件信息。表格原文件保存在 `.data/files/<文件UUID>.bin`，重启后仍可分析；表格正文只保存表头和前 5 行预览。其他文档原文件不长期保留。部署或备份时，需要同时保存数据库和 `.data/files/`。
+数据库保存提取后的文本、分块和文件信息。表格和图片原文件保存在 `.data/files/<文件UUID>.bin`，重启后仍可分析；表格正文只保存表头和前 5 行预览，图片不生成文本块。其他文档原文件不长期保留。部署或备份时，需要同时保存数据库和 `.data/files/`。
 移除待发送附件只取消本轮选择；删除会话会删除关联，不删除可被其他会话使用的文档及分块。
 上传后未使用的文档也会保留，当前没有自动清理任务。
 
@@ -327,9 +354,3 @@ $env:SEMANTIC_MODEL_PATH = "$PWD\.data\models\bge-small-zh-v1.5"
 表格限制：单文件 20 MiB、最多 20 张工作表、每张最多 100000 行和 100 列、工作簿总数据单元格最多 2000000 个、XLSX 解压后最多 100 MiB。空工作表可以列出和预览。原文件缺失时提示重新上传。
 
 `calculate(expression, decimal_places=28)` 使用 AST 白名单和 Fraction 精确计算，支持十进制、科学计数法、括号及 `+ - * / // % **`。`exact` 始终是精确结果，`decimal` 是展示小数，`rounded` 表示是否舍入；整数幂指数限定为 -100～100，不执行函数或变量。表达式最多 1000 字符，展示小数最多 100 位。
-
-验证命令（不调用外部模型或真实数据库）：
-
-```powershell
-.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
-```

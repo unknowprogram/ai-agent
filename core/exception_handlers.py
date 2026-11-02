@@ -28,7 +28,8 @@ from core.exceptions import (
 )
 from schemas.error import ErrorResponse
 
-from core.exceptions import ContextTooLargeError
+# 原实现：from core.exceptions import ContextTooLargeError
+from core.exceptions import ContextTooLargeError, VisionConfigError
 logger = logging.getLogger(__name__)
 
 
@@ -127,6 +128,27 @@ ERROR_SPECS: dict[type[Exception], ErrorSpec] = {
         status.HTTP_503_SERVICE_UNAVAILABLE, "语义模型未准备好，请配置本地模型或使用关键词检索。",
     ),
 }
+
+# 保留原有映射便于对比；视觉接入后扩展文件提示。
+ERROR_SPECS.update({
+    VisionConfigError: ErrorSpec(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "请检查 .env 中的 SENSENOVA_API_KEY、SENSENOVA_BASE_URL、"
+        "SENSENOVA_MODEL、SENSENOVA_TIMEOUT 和 SENSENOVA_MAX_TOKENS。",
+    ),
+    UnsupportedFileError: ErrorSpec(
+        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        "目前支持 TXT、MD、PDF、DOCX、XLSX、XLS、CSV，"
+        "以及 JPG、JPEG、PNG、WebP 静态图片。",
+    ),
+    FileDataUnavailableError: ErrorSpec(
+        status.HTTP_400_BAD_REQUEST, "原始文件数据缺失，请重新上传该文件。",
+    ),
+    FileTextUnavailableError: ErrorSpec(
+        status.HTTP_400_BAD_REQUEST,
+        "未提取到可用文字。扫描版 PDF 请先转为图片上传，或先进行 OCR 识别。",
+    ),
+})
 
 # Swagger 的错误响应与实际处理共用一份状态码来源。
 ERROR_RESPONSES = {

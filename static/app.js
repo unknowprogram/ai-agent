@@ -63,6 +63,11 @@
 
   function stagedFiles() { return activeSession()?.stagedFiles || state.newFiles; }
 
+  function isImageFile(file) {
+    return ['jpg', 'jpeg', 'png', 'webp'].includes(file.file_type)
+      || /\.(jpg|jpeg|png|webp)$/i.test(file.filename || '');
+  }
+
   function renderAttachments() {
     const container = $('#attachments');
     container.replaceChildren();
@@ -74,7 +79,16 @@
       const filename = node('div', 'attachment-name', file.filename);
       filename.title = file.filename;
       const warnings = Array.isArray(file.warnings) ? file.warnings : [];
-      const label = file.error || (file.uploading ? '正在上传并识别……' : `${(file.char_count || 0).toLocaleString()} 字 · 待发送${warnings.length ? ' · 有识别提示' : ''}`);
+      // 原实现：const label = file.error || (file.uploading ? '正在上传并识别……' : `${(file.char_count || 0).toLocaleString()} 字 · 待发送${warnings.length ? ' · 有识别提示' : ''}`);
+      const image = isImageFile(file);
+      const label = file.error || (
+        file.uploading
+          ? (image ? '正在上传并校验图片……' : '正在上传并处理文件……')
+          : (image
+              ? '图片 · 待发送，发送后进行视觉识别'
+              : `${(file.char_count || 0).toLocaleString()} 字 · 待发送`
+            ) + (warnings.length ? ' · 有处理提示' : '')
+      );
       info.append(filename, node('div', 'attachment-meta', label));
       card.title = warnings.join('\n') || file.preview || file.filename;
       card.append(icon('book'), info);
@@ -97,13 +111,17 @@
     if (files.length + queue.length + bound.length > 5) { toast('每个会话最多 5 个文件，请先移除待发送附件。'); return; }
     state.uploading = true;
     $('#upload-status').hidden = false;
-    $('#upload-status').textContent = '正在上传并识别文件，请稍候……';
+    // 原提示：正在上传并识别文件，请稍候……
+    $('#upload-status').textContent = '正在上传并处理文件，请稍候……';
     renderSidebar(); updateInput();
     for (const file of files) {
       const entry = { filename: file.name, uploading: true };
       queue.push(entry); renderAttachments();
       try {
-        if (!/\.(txt|md|pdf|docx|xlsx|xls|csv)$/i.test(file.name)) throw new Error('仅支持 TXT、MD、PDF、DOCX、XLSX、XLS、CSV。');
+        // 原实现：if (!/\.(txt|md|pdf|docx|xlsx|xls|csv)$/i.test(file.name)) throw new Error('仅支持 TXT、MD、PDF、DOCX、XLSX、XLS、CSV。');
+        if (!/\.(txt|md|pdf|docx|xlsx|xls|csv|jpg|jpeg|png|webp)$/i.test(file.name)) {
+          throw new Error('仅支持 TXT、MD、PDF、DOCX、XLSX、XLS、CSV，以及 JPG、JPEG、PNG、WebP 静态图片。');
+        }
         if (file.size > MAX_UPLOAD_BYTES) throw new Error('文件不能超过 20 MB。');
         const body = new FormData(); body.append('file', file);
         const response = await fetch('/api/files', { method: 'POST', body, signal: AbortSignal.timeout(90000) });
@@ -118,7 +136,8 @@
       renderAttachments(); persist();
     }
     state.uploading = false;
-    $('#upload-status').textContent = queue.some(file => file.error) ? '部分文件识别失败，请移除失败附件后重试。' : '文件已添加，将随这条问题一起发送。';
+    // 原提示：部分文件识别失败，请移除失败附件后重试。
+    $('#upload-status').textContent = queue.some(file => file.error) ? '部分文件处理失败，请移除失败附件后重试。' : '文件已添加，将随这条问题一起发送。';
     renderSidebar(); updateInput(); elements.input.focus();
   }
 
@@ -675,6 +694,7 @@
             search_documents: '正在检索文档',
             semantic_search: '正在进行语义检索',
             analyze_spreadsheet: '正在分析表格',
+            analyze_image: '正在识别图片',
             calculate: '正在精确计算',
             web_search: '正在搜索网页',
             scrape_webpage: '正在阅读网页',
