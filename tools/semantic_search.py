@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from core.exceptions import SemanticSearchUnavailableError
 from storage import documents
+from tools.document_retrieval import passages, select_distinct
 
 _EMBED_LOCK = RLock()
 
@@ -53,9 +54,7 @@ def _model():
         raise SemanticSearchUnavailableError() from exc
 
 
-@lru_cache(maxsize=2)
 def _encode(texts: tuple[str, ...]):
-    # 缓存只包含最近两批文本；正文变化会自动使缓存键变化。
     with _EMBED_LOCK:
         try:
             return _model().encode(
@@ -68,45 +67,47 @@ def _encode(texts: tuple[str, ...]):
             raise SemanticSearchUnavailableError() from exc
 
 
-def _semantic_search(query: str, file_ids: list[str], limit: int) -> list[dict]:
-    if not query.strip() or len(query) > 400:
-        raise ValueError("query 必须是 1～400 个字符。")
-    if type(limit) is not int or not 1 <= limit <= 4:
-        raise ValueError("limit 必须是 1～4 的整数。")
-    # 范围由 Agent 校验并传入；保留数据库异常，不能伪装成模型故障。
-    chunks = documents.get_document_chunks(file_ids)
-    passages = []
-    for chunk in chunks:
-        text = chunk["content"]
-        # 将约 1000 字的原始分块拆成 400 字短片段，相邻重叠 80 字。
-        # 返回实际命中的短片段，避免只引用原始分块的开头。
-        for start in range(0, len(text), 320):
-            content = text[start:start + 400]
-            if content.strip():
-                passages.append({**chunk, "content": content, "char_start": start})
-            if start + 400 >= len(text):
-                break
-    if not passages:
+@lru_cache(maxsize=2)
+def _passage_vectors(texts: tuple[str, ...]):
+    # 正文和查询分开缓存，改写查询不会挤掉刚编码过的整个语料库。
+    return _encode(texts)
+
+
+@lru_cache(maxsize=64)
+def _query_vector(query: str):
+    return _encode(("为这个句子生成表示以用于检索相关文章：" + query,))[0]
+
+
+def rank_semantic(query: str, items: list[dict], limit: int) -> list[dict]:
+    """对相同原文窗口排序，不重复读取数据库或提前按原始块去重。"""
+    if not items:
         return []
     try:
         import numpy as np
     except ImportError as exc:
         raise SemanticSearchUnavailableError() from exc
-    vectors = _encode(tuple(item["content"] for item in passages))
-    query_vector = _encode(("为这个句子生成表示以用于检索相关文章：" + query.strip(),))[0]
+    vectors = _passage_vectors(tuple(item["content"] for item in items))
+    query_vector = _query_vector(query.strip())
     # 归一化向量的点积等于余弦相似度；分数不是答案正确的概率。
     scores = vectors @ query_vector
-    selected, seen = [], set()
+    selected = []
     for index in np.argsort(-scores, kind="stable"):
-        item = passages[int(index)]
-        key = (item["file_id"], item["chunk_index"])
-        if key in seen:
+        if not np.isfinite(scores[index]) or scores[index] <= 0:
             continue
-        seen.add(key)
-        selected.append({**item, "score": round(float(scores[index]), 6)})
+        selected.append({**items[int(index)], "score": round(float(scores[index]), 6)})
         if len(selected) == limit:
             break
     return selected
+
+
+def _semantic_search(query: str, file_ids: list[str], limit: int) -> list[dict]:
+    if not query.strip() or len(query) > 400:
+        raise ValueError("query 必须是 1～400 个字符。")
+    if type(limit) is not int or not 1 <= limit <= 4:
+        raise ValueError("limit 必须是 1～4 的整数。")
+    # 独立入口保留兼容；Agent 默认只开放已包含向量召回的 search_documents。
+    chunks = documents.get_document_chunks(file_ids)
+    return select_distinct(rank_semantic(query, passages(chunks), 20), limit)
 
 
 async def semantic_search(query: str, file_ids: list[str], limit: int = 4) -> list[dict]:

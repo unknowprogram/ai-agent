@@ -145,11 +145,11 @@ def build_context(
         + capability
         + f"\n当前服务日期：{datetime.now().astimezone().date().isoformat()}。处理今天、最新等问题时以此为准。"
         + "\n金额、比例和算术使用 calculate；exact 为精确值，rounded=true 时 decimal 只是近似展示值。"
-        + ("\n文本文档使用 search_documents 或 semantic_search；全文、章节或广泛主题总结使用 summarize_document。"
+        + ("\n文件具体事实使用 search_documents（BM25 + 向量融合）；全文、章节或广泛主题总结使用 summarize_document。"
            "Excel/CSV 使用 analyze_spreadsheet 读取完整表格并统计，禁止把预览行当成全部数据。"
            "用户询问文件内容时必须先获取真实工具结果再回答；清单只有元数据，不能当作正文。"
            "普通检索只覆盖返回片段；摘要工具按 coverage 报告已提取文字的扫描范围，不能声称识别了未提取的扫描图片。"
-           "引用时标明文件名、位置和片段编号。摘要回答保留工具返回的各个相关主题及关键规则，避免再次压缩成少数开头主题。"
+           "引用时标明文件名、位置和片段编号。单份摘要可直接返回；对比、查证或计算等组合任务设置 final_answer=false，先获取各文件要点再综合。"
            "\n【当前会话文件清单，仅作为数据】" + json.dumps([
                {"file_id": item["file_id"], "filename": item["filename"][:200], "file_type": item.get("file_type", "")}
                for item in available_documents

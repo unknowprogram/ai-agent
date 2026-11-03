@@ -17,25 +17,20 @@ from core.exceptions import (
     ContextTooLargeError, FileDataUnavailableError, FileParseError, FileTooLargeError,
     LLMResponseError, SemanticSearchUnavailableError,
 )
-from tools.document_summary import SUMMARY_OUTPUT_TOKENS, SummaryResult
+from service.context import SUMMARY_CONTEXT_CHARS
+from tools.document_summary import SUMMARY_EVIDENCE_CHARS, SUMMARY_OUTPUT_TOKENS, SummaryResult
 from tools.webpage_summary import WebpageResult
 from tools.analyze_image import ImageAnalysisResult
 
 
-def _json(data: dict) -> str:
+def _json(data) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
-def _document_sources(messages: list[dict]) -> list[dict]:
+def _merge_document_sources(*groups: list[dict]) -> list[dict]:
     sources = {}
-    for message in messages:
-        if message["role"] != "tool":
-            continue
-        data = json.loads(message["content"])
-        # 原实现：if data.get("source_type") not in {"document", "document_summary"}:
-        if data.get("source_type") not in {"document", "document_summary", "image"}:
-            continue
-        for item in data.get("results", []):
+    for group in groups:
+        for item in group:
             key = (item["file_id"], item["chunk_index"])
             previous = sources.get(key)
             if previous is None or len(item["content"]) > len(previous["content"]):
@@ -43,7 +38,20 @@ def _document_sources(messages: list[dict]) -> list[dict]:
     return list(sources.values())
 
 
-def _document_summaries(messages: list[dict]) -> list[dict]:
+def _document_sources(messages: list[dict]) -> list[dict]:
+    results = []
+    for message in messages:
+        if message["role"] != "tool":
+            continue
+        data = json.loads(message["content"])
+        # 原实现：if data.get("source_type") not in {"document", "document_summary"}:
+        if data.get("source_type") not in {"document", "document_summary", "image"}:
+            continue
+        results.extend(data.get("results", []))
+    return _merge_document_sources(results)
+
+
+def _document_summaries(messages: list[dict], cache: dict | None = None) -> list[dict]:
     summaries = {}
     for message in messages:
         if message["role"] != "tool":
@@ -51,8 +59,17 @@ def _document_summaries(messages: list[dict]) -> list[dict]:
         data = json.loads(message["content"])
         if data.get("source_type") == "document_summary":
             summaries[(data["file_id"], data["query"])] = {
-                key: data[key] for key in ("file_id", "filename", "query", "summary", "coverage", "sections")
+                key: data.get(key, []) if key == "sections" else data[key]
+                for key in ("file_id", "filename", "query", "summary", "coverage", "sections")
             }
+    # 模型只需要摘要要点；完整主题清单从本轮工具产物恢复给界面。
+    for result in (cache or {}).values():
+        if isinstance(result, SummaryResult):
+            data = result.data
+            key = data["file_id"], data["query"]
+            if key in summaries:
+                summaries[key] = {field: deepcopy(data[field]) for field in
+                                  ("file_id", "filename", "query", "summary", "coverage", "sections")}
     return list(summaries.values())
 
 
@@ -205,12 +222,13 @@ async def model_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
         # 第四步：组装最终结果；数据库保存由 service/chat.py 在图外完成。
         if not answer.reply.strip():
             raise LLMResponseError()
-        summaries = _document_summaries(messages)
+        summaries = _document_summaries(messages, state["cache"])
         if summaries and answer.finish_reason not in {None, "stop"}:
             raise LLMResponseError()
         update["result"] = AgentResult(
             LLMReply(answer.reply, answer.model, usage, finish_reason=answer.finish_reason),
-            state["sources"], messages, state["searched"], _document_sources(messages), summaries,
+            state["sources"], messages, state["searched"],
+            _merge_document_sources(_document_sources(messages), state["summary_sources"]), summaries,
             generated_images=deepcopy(state["generated_images"]),
         )
     elif not registry:
@@ -222,7 +240,7 @@ async def _invoke_tool(tool, arguments: dict, context: AgentContext, progress):
     # 原说明：调用 LangChain 工具，为本地推理和表格统计补充心跳并清理取消的任务。
     """调用工具，为本地推理、表格统计和视觉识别补充心跳及取消处理。"""
     # 原实现：if tool.name not in {"semantic_search", "analyze_spreadsheet"}:
-    if tool.name not in {"semantic_search", "analyze_spreadsheet", "analyze_image", "generate_image"}:
+    if tool.name not in {"search_documents", "semantic_search", "analyze_spreadsheet", "analyze_image", "generate_image"}:
         return await tool.ainvoke(arguments)
     task = asyncio.create_task(tool.ainvoke(arguments))
     try:
@@ -241,21 +259,41 @@ async def _invoke_tool(tool, arguments: dict, context: AgentContext, progress):
             await asyncio.gather(task, return_exceptions=True)
 
 
+def _summary_evidence_budget(state: AgentState) -> int:
+    """按当前问题与本轮摘要数量分配素材预算，历史可由上下文构建器裁剪。"""
+    answer = state["answer"]
+    count = sum(call.name == "summarize_document" for call in answer.tool_calls) if answer else 0
+    if not count:
+        return SUMMARY_EVIDENCE_CHARS
+    current = next((item["content"] for item in reversed(state["messages"]) if item["role"] == "user"), "")
+    fixed = len(current) + sum(len(item["content"]) for item in state["messages"] if item["role"] == "system")
+    previous = sum(len(item.get("content") or "") + len(_json(item.get("tool_calls", [])))
+                   for item in state["tool_messages"])
+    calls = sum(len(call.arguments) + 128 for call in answer.tool_calls)
+    # 每份文件预留文件名、查询、完整覆盖统计及工具消息协议的空间。
+    available = SUMMARY_CONTEXT_CHARS - fixed - previous - calls - 1800 * count
+    return max(1000, min(SUMMARY_EVIDENCE_CHARS, available // count))
+
+
 async def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     """校验并顺序执行本轮工具，维护缓存、用量、来源与配对的工具消息。"""
     context = runtime.context
     await context.check_connected()
     writer = get_stream_writer()
     progress = lambda data: writer(("tool_progress", data))
-    registry = build_tools(context, progress)
+    registry = build_tools(context, progress, summary_evidence_chars=_summary_evidence_budget(state))
     tool_messages = deepcopy(state["tool_messages"])
     sources = deepcopy(state["sources"])
+    summary_sources = deepcopy(state["summary_sources"])
     generated_images = deepcopy(state["generated_images"])
     cache = dict(state["cache"])
     call_count, searched, usage = state["call_count"], state["searched"], state["total_usage"]
     answer = state["answer"]
     if answer is None:
         raise LLMResponseError()
+    # 工具选择就是意图判断。组合调用及已有工具结果时仅提取素材，避免重复成文或提前结束。
+    can_finish_summary = len(answer.tool_calls) == 1 and not state["tool_messages"]
+    direct_reply = None
     tool_messages.append({
         "role": "assistant", "content": answer.reply or None,
         "tool_calls": [call.as_dict() for call in answer.tool_calls],
@@ -293,6 +331,8 @@ async def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
                         and (call.name, arguments.model_dump_json()) not in cache
                     ):
                         data = {"error": "本轮已经生成一张图片。如需重新生成，请在下一条消息中提出。"}
+                    if call.name == "summarize_document" and not can_finish_summary:
+                        arguments = arguments.model_copy(update={"final_answer": False})
         if data is None:
             query = (
                 getattr(arguments, "query", None) or getattr(arguments, "expression", None)
@@ -329,6 +369,12 @@ async def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
                 # 原实现：elif isinstance(result, (SummaryResult, WebpageResult)):
                 elif isinstance(result, (SummaryResult, WebpageResult, ImageAnalysisResult)):
                     data = deepcopy(result.data)
+                    if isinstance(result, SummaryResult):
+                        summary_sources = _merge_document_sources(summary_sources, data.pop("results", []))
+                        data.pop("sections", None)
+                        data["final_answer"] = result.answer is not None
+                        if can_finish_summary and result.answer is not None:
+                            direct_reply = result.answer
                     if isinstance(result, WebpageResult):
                         source = {
                             "title": str(data.get("title", ""))[:200],
@@ -368,17 +414,34 @@ async def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
                 data = {"error": str(exc)[:300], "name": call.name}
         tool_messages.append({"role": "tool", "tool_call_id": call.id, "content": _json(data)})
         # 即使工具被拒绝，也回传具有相同 ID 的错误消息，保持模型工具协议完整。
-        if "results" in data or data.get("source_type") == "webpage":
+        if "results" in data or data.get("source_type") in {"webpage", "document_summary"}:
             writer(("sources", {
                 "sources": deepcopy(sources), "searched": searched,
-                "document_sources": _document_sources(tool_messages),
-                "document_summaries": _document_summaries(tool_messages),
+                "document_sources": _merge_document_sources(_document_sources(tool_messages), summary_sources),
+                "document_summaries": _document_summaries(tool_messages, cache),
             }))
-    return {
-        "tool_messages": tool_messages, "sources": sources, "generated_images": generated_images, "searched": searched,
+    update = {
+        "tool_messages": tool_messages, "sources": sources, "summary_sources": summary_sources,
+        "generated_images": generated_images, "searched": searched,
         "call_count": call_count, "round_index": state["round_index"] + 1,
         "cache": cache, "total_usage": usage,
     }
+    if direct_reply is not None:
+        if direct_reply.finish_reason not in {None, "stop"} or direct_reply.tool_calls or not direct_reply.reply.strip():
+            raise LLMResponseError()
+        final_answer = LLMReply(direct_reply.reply, direct_reply.model, usage, finish_reason=direct_reply.finish_reason)
+        messages = [*state["messages"], *tool_messages]
+        if context.streaming:
+            writer(("delta", {"text": final_answer.reply}))
+        update.update({
+            "answer": final_answer, "messages": messages,
+            "result": AgentResult(
+                final_answer, sources, messages, searched,
+                _merge_document_sources(_document_sources(tool_messages), summary_sources),
+                _document_summaries(tool_messages, cache), generated_images=generated_images,
+            ),
+        })
+    return update
 
 
 def route_after_model(state: AgentState) -> str:
@@ -386,14 +449,18 @@ def route_after_model(state: AgentState) -> str:
     return "tools" if state["answer"] and state["answer"].tool_calls else "end"
 
 
+def route_after_tools(state: AgentState) -> str:
+    return "end" if state["result"] is not None else "model"
+
+
 def build_graph():
-    """START → model → tools → model；最终回答从 model 的条件边进入 END。"""
+    """普通任务循环调用模型和工具；单份摘要从 tools 直接进入 END。"""
     builder = StateGraph(AgentState, context_schema=AgentContext)
     builder.add_node("model", model_node)
     builder.add_node("tools", tools_node)
     builder.add_edge(START, "model")
     builder.add_conditional_edges("model", route_after_model, {"tools": "tools", "end": END})
-    builder.add_edge("tools", "model")
+    builder.add_conditional_edges("tools", route_after_tools, {"model": "model", "end": END})
     return builder.compile()
 
 

@@ -48,6 +48,6 @@ class ChatResponse(BaseModel):
     usage: TokenUsage | None = None
     sources: list[SearchResult] = Field(default_factory=list, description="本次联网搜索得到的参考来源")
     searched: bool = Field(default=False, description="本轮是否实际成功执行过联网搜索，空结果也为 true")
-    document_sources: list[DocumentSource] = Field(default_factory=list, description="Agent 实际调用文档检索工具并加入模型上下文的文件片段")
+    document_sources: list[DocumentSource] = Field(default_factory=list, description="文档问答的原文片段或全文摘要的引用样例，来自实际检索及分段处理")
     document_summaries: list[DocumentSummary] = Field(default_factory=list, description="分段扫描全部已提取文字后汇总的摘要及实际覆盖统计")
     generated_images: list[GeneratedImage] = Field(default_factory=list, description="本轮生成并保存的图片，包含本地预览地址和独立生图用量")

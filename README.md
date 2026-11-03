@@ -79,7 +79,7 @@ Swagger 中已列出聊天接口的错误状态码及响应结构。
 `POST /api/chat/stream` 使用与 `/api/chat` 相同的请求体，返回 `text/event-stream`。
 前端使用 `fetch` 读取 SSE，支持中文跨数据块解码和逐段追加显示。
 
-- `tool_start`：Agent 准备调用工具，`name` 区分 `web_search`、`search_documents`、`summarize_document`、`semantic_search`、`analyze_spreadsheet` 和 `calculate`；`query` 展示查询范围、文件名或表达式；`reset: true` 清除中间说明，等待最终回答。
+- `tool_start`：Agent 准备调用工具，`name` 区分 `web_search`、`search_documents`、`summarize_document`、`analyze_spreadsheet`、`analyze_image`、`generate_image` 和 `calculate`；`query` 展示查询范围、文件名或表达式；`reset: true` 清除中间说明，等待最终回答。
 - `tool_progress`：摘要工具的章节定位、分段读取 / 归纳、合并进度，包含 `stage`、`message`，分段处理时还有 `completed`、`total`。
 - `sources`：本轮网页来源 `sources`、是否已执行联网搜索 `searched`、文档引用 `document_sources` 及已完成的摘要 `document_summaries`；首次事件来源为空，工具执行后更新。
 - `generated_images`：本轮生成图片的元数据列表；原件已保存，可以预览下载，最终 `done` 确认图片与问答已关联并提交数据库。
@@ -282,7 +282,7 @@ SENSENOVA_IMAGE_PROMPT_EXTEND=true
 
 核心代码：`agent/image_generation.py` 调用模型；`tools/generate_image.py` 校验并保存图片；`storage/generated_images.py` 管理原件和消息关联；`schemas/images.py` 定义响应；`router/images.py` 提供图片读取。
 
-离线验证（不会调用真实模型）：
+当前离线验证覆盖文档检索、全文摘要、工具路由与聊天保存（模型响应由测试模拟）：
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
@@ -349,16 +349,18 @@ DOCX 解压后大小不超过 100 MiB、压缩条目不超过 2000 个。
 }
 ```
 
-上传后，准备阶段向 Agent 提供当前会话的文件清单，并将这条请求的 `file_ids` 对应文件写入当前问题的「本条问题附带的文件」资料。已有文件与本轮新附件可明确区分。Agent 自主选择 `search_documents` 查询具体条款，或 `summarize_document` 总结全文、章节和广泛主题；可以生成查询范围并指定清单中的文件 ID，也可以与 `web_search` 组合使用。
+上传后，准备阶段向 Agent 提供当前会话的文件清单，并将这条请求的 `file_ids` 对应文件写入当前问题的「本条问题附带的文件」资料。已有文件与本轮新附件可明确区分。Agent 通过直接回答或工具选择完成意图分流：通用概念和写作直接回答，文件具体事实调用 `search_documents`，全文、章节和广泛主题总结调用 `summarize_document`。不增加一次独立的分类模型请求；可以结合历史生成查询范围、指定清单中的文件 ID，并与网页或计算工具组合。
 后续仅带上响应中的 `conversation_id` 和新问题，即可由 Agent 继续查询已关联文件。
 `file_ids` 可以给已有会话追加文件，不会替换已有附件。模型回答及文件关联在同一数据库事务中提交，失败时保留文件解析结果供重试。
 会话详情接口包含 `files` 数组，前端刷新和切换时恢复文件绑定状态，不显示已关联附件卡片。
 
 普通及流式完成响应新增 `document_sources`，包含 `file_id`、`filename`、`chunk_index`、`location` 和 `content`。
-它们是本次实际送入模型上下文的参考片段，不代表模型核实或引用了每一个片段。
-`search_documents` 按关键词和中文相邻双字匹配，最多选 4 个片段，每段最多 700 字符，再受整体上下文预算限制，适合具体事实查询。
-`summarize_document(file_id, query)` 执行「定位相关章节 → 分段读取 → 分段总结 → 合并汇总」。它读取指定文件全部非空分块，每批最多约 12000 个 JSON 字符，保留每块完整正文；标题只辅助定位，不用于过滤正文。每批归纳相关内容，全部分段结果进入逐级合并，不按 top-k 丢弃后续批次。
-工具只访问服务端校验后的当前会话文件，未调用时不读取正文分块。所有工具共享每轮最多 2 轮、合计 3 次调用的外层预算；摘要内部的模型调用在一次工具执行中完成，用量累计到本轮 `usage`。摘要最多 128 个读取批次、8 层合并；分段归纳与中间合并最多 4096 Token，最终摘要及综合回答最多 8192 Token。分段或中间合并输出截断时自动缩小当前输入后重试，完整保留文字和摘要要点；超过处理上限、不能继续拆分、最终输出截断或结果格式异常时返回错误，不把未完成处理显示为完整摘要。
+文档问答的来源是实际送入模型上下文的片段；全文摘要的来源是完整分段处理后的引用样例，独立保留给界面，不再重复发送给最终回答模型。来源不代表模型逐项核实或引用了所有片段。
+`search_documents(query, file_id?, limit=4)` 一次读取当前文件范围，在相同的 400 字原文窗口上执行标准 BM25 和本地 BGE 向量排序，各召回最多 20 项，通过 RRF 融合、去重，最终返回最多 4 项。保留真实命中内容、位置及 `char_start`，不会只截取原始块开头。向量模型不可用时自动降级为 BM25，并通过结果及进度说明实际方法；两路没有有效结果时返回空列表，不拿文件开头充当命中。
+`summarize_document(file_id, query, final_answer=true)` 读取指定文件全部非空分块，每批最多约 12000 个 JSON 字符；标题只辅助定位，不过滤正文。Map 只提取紧凑要点：标题最多 80 字符，每项摘要最多 400 字符，最多 3 个代表性来源。完全重复的要点先在本地合并；所有要点能放入最终 24000 字符输入预算时直接生成摘要，超出时才执行 Reduce，不按 top-k 丢弃后续批次。检索窗口的重叠正文仍保留，避免误删真实重复条款。
+单份摘要完成后图直接结束，经现有保存流程返回，主 Agent 不再重写一遍。对比、联网查证或计算等组合任务使用 `final_answer=false`；同轮多个工具、或已有工具结果时服务端也会强制采用素材模式。素材按当前问题和摘要数量分配预算，每份最多 6000 字符；主 Agent 获取全部结果后一次生成最终回答。格式、语言和篇幅要求应包含在 `query` 中，单份最终摘要同时接收用户原始问题。
+工具只访问服务端校验后的当前会话文件，未调用时不读取正文分块。所有工具共享每轮最多 2 轮、合计 3 次调用的外层预算；摘要内部用量累计到本轮 `usage`。摘要最多 128 个读取批次、8 层合并；Map 与 Reduce 输出上限从 4096 降为 2048 Token，最终正文仍最多 8192 Token。输出截断时缩小当前输入重试，保留所有输入文字或要点；格式异常、不能继续拆分、最终输出截断或超出处理上限时返回错误，不显示虚假的完整覆盖。合并不能有效缩小时停止并报错。
+成功完成的 Map 产物与最终摘要缓存在 `.data/summary_cache/`，按文件 UUID、正文和位置、查询范围、解析提示、模型配置及摘要版本生成指纹。最终正文还校验原始问题，格式要求变化时可复用 Map 后重新成文。缓存有效期 7 天，每个文件最多 8 项；损坏、过期或不完整的缓存被忽略。完整最终缓存命中不再调用摘要模型，`usage` 只统计本轮真实请求。缓存是可重建的派生数据，无需数据库迁移。
 普通及流式完成响应的 `document_summaries` 包含文件名、查询范围、摘要、相关主题和 `coverage`（已处理 / 总片段数、批次数、起止位置、`all_extracted_text_scanned`、解析提示）。页面仅缓存展示所需元数据；数据库仍只保存最终问答。完整扫描指全部已提取文字，不含未提取的扫描页或图片，也不保证模型归纳毫无遗漏。
 
 数据库保存提取后的文本、分块和文件信息。表格和图片原文件保存在 `.data/files/<文件UUID>.bin`，重启后仍可分析；表格正文只保存表头和前 5 行预览，图片不生成文本块。其他文档原文件不长期保留。部署或备份时，需要同时保存数据库和 `.data/files/`。
@@ -371,16 +373,16 @@ DOCX 解压后大小不超过 100 MiB、压缩条目不超过 2000 个。
 
 ## 语义检索、表格分析和精确计算
 
-三个工具已接入普通和流式聊天，共享现有 2 轮、合计 3 次工具调用预算。工具按服务端文件类型开放；表格不会使用文档预览进行统计。参数错误、除零和缺失列等错误回传模型，允许在预算内修正。
+文档混合检索、表格分析和计算已接入普通和流式聊天，共享现有 2 轮、合计 3 次工具调用预算。工具按服务端文件类型开放；表格不会使用文档预览进行统计。参数错误、除零和缺失列等错误回传模型，允许在预算内修正。
 
-`semantic_search(query, file_id?, limit=4)` 使用 BGE 中文向量模型检索当前会话文档。模型只在工具实际调用时加载；只使用本地已有权重，不在在线请求中下载。首次准备模型可执行：
+`search_documents` 内置 BGE 中文向量召回，Agent 无需分别调用关键词和语义工具。`tools/semantic_search.py` 保留独立 Python 检索入口，默认不再单独向 Agent 开放。模型只在实际文档问答时加载；只使用本地已有权重，不在在线请求中下载。首次准备模型可执行：
 
 ```powershell
 .\.venv\Scripts\python.exe -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-zh-v1.5').save('.data/models/bge-small-zh-v1.5')"
 $env:SEMANTIC_MODEL_PATH = "$PWD\.data\models\bge-small-zh-v1.5"
 ```
 
-模型准备命令需要访问模型下载站点。也可把预先下载的完整模型目录配置到 `SEMANTIC_MODEL_PATH`；`SEMANTIC_DEVICE` 默认为 `cpu`。未准备模型时工具返回明确错误，Agent 可改用关键词检索。相似度不是答案正确率；结果保留实际命中的短片段和原始位置。
+模型准备命令需要访问模型下载站点。也可把预先下载的完整模型目录配置到 `SEMANTIC_MODEL_PATH`；`SEMANTIC_DEVICE` 默认为 `cpu`。未准备模型时混合工具自动降级为 BM25，并明确说明。语料与查询向量分开缓存在内存，改写查询不会挤掉整份文件的向量。相似度和 RRF 分数都不是答案正确率。
 
 `analyze_spreadsheet(file_id, ...)` 支持 `sheets`、`preview`、`profile` 和 `aggregate`；工作表可按名称或从 0 开始的索引选择。`filters` 按列精确匹配，多个条件为 AND，null 表示空值。聚合支持 sum、mean、min、max、count、按列分组，以及 sort=asc/desc。count 未指定列时统计行数，指定列时统计非空值。limit 只限制展示条数，统计处理全部匹配行；结果提供 matched_rows 和截断标记。浮点统计不保证财务小数精确性。
 

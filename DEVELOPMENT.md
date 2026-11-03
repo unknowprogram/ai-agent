@@ -1,6 +1,6 @@
 # 企业智能助手开发文档
 
-本文更新至 2026-11-02 的 LangChain / LangGraph 迁移，说明当前实现、每个源码文件的职责、技术选型、运行方式和扩展入口。页面品牌为“知序”，FastAPI 应用名称为“智能助手”。代码变更后，应同步更新本文对应章节。
+本文更新至 2026-11-03 的文档混合检索与摘要优化版本，说明当前实现、每个源码文件的职责、技术选型、运行方式和扩展入口。页面品牌为“知序”，FastAPI 应用名称为“智能助手”。代码变更后，应同步更新本文对应章节。
 
 迁移对照保存在 `agent/llm.py` 和 `agent/runner.py` 的“迁移前实现”注释块中，新实现位于同文件的“当前实现”标记之后。模型通过 LangChain 调用；模型与工具之间的路由由 LangGraph 接管；MySQL 继续负责会话历史，不使用图 checkpoint 代替业务会话存储。
 
@@ -35,8 +35,8 @@
 | 流式回答 | 后端返回 SSE，网页逐段追加模型正文 |
 | 多轮会话 | MySQL 持久化问答，后续通过 `conversation_id` 恢复最近历史 |
 | 会话管理 | 创建、列出、读取、删除会话 |
-| 文件问答 | Agent 自主调用 search_documents 查询条款，或 summarize_document 扫描全部已提取文字并分段汇总 |
-| 语义检索 | semantic_search 使用本地 BGE 中文模型查询同义表达，返回真实片段 |
+| 文件问答 | Agent 用工具选择判断意图；事实问题走 BM25 + 向量融合，全文摘要走 Map / 按需 Reduce |
+| 语义检索 | search_documents 内置本地 BGE 召回，RRF 融合后返回真实片段，模型不可用时降级 BM25 |
 | 表格分析 | analyze_spreadsheet 读取 Excel/CSV 完整数据，支持筛选、分组和统计 |
 | 精确计算 | calculate 使用 AST 白名单和有理数计算，明确报告小数舍入 |
 | 联网搜索 | DeepSeek 自主生成 `web_search` 工具调用，后端执行 Tavily 并回传结果 |
@@ -44,7 +44,7 @@
 | 输入与异常管理 | Pydantic 校验、统一业务异常、统一 HTTP 状态码 |
 | 开发调试 | FastAPI 自动生成 Swagger 和 OpenAPI |
 
-当前执行顺序为：读取记忆 → 校验文件范围并提供清单 → 组装上下文 → 模型自主决定回答或调用工具 → 回传工具结果并继续调用模型 → 保存最终问答。`agent/runner.py` 适配图事件；`agent/graph.py` 执行模型和工具节点；`agent/tool_registry.py` 注册 `web_search`、`scrape_webpage`、`search_documents`、`summarize_document`、`semantic_search`、`analyze_spreadsheet` 和 `calculate`。按服务端文件类型提供工具，共享最多 2 轮、合计 3 次调用的外层预算。网页及文档摘要内部的分段读取、归纳和合并在一次工具调用中完成。未单独处理或展示模型的 `reasoning_content`。
+当前执行顺序为：读取记忆 → 校验文件范围并提供清单 → 组装上下文 → 模型自主决定回答或调用工具 → 保存最终问答。事实问答回传检索结果后继续调用模型；单份文档摘要从工具节点直接结束，组合任务只返回要点后统一成文。意图判断复用模型的直接回答或工具选择，不新增分类请求。`agent/runner.py` 适配图事件；`agent/graph.py` 执行模型、工具节点及结束路由；`agent/tool_registry.py` 默认注册混合 `search_documents` 和 `summarize_document`，语义召回已在工具内部完成。网页、表格、计算、视觉与生图工具继续按原配置和文件类型开放，共享最多 2 轮、合计 3 次调用的外层预算。未单独处理或展示模型的 `reasoning_content`。
 
 ## 2. 技术栈
 
@@ -125,6 +125,7 @@ ai-agent/
 │   ├── mysql.py               # 连接、事务、会话与消息存储
 │   ├── documents.py           # 文档与分块存储
 │   ├── generated_images.py    # 生图原件及消息关联
+│   ├── summary_cache.py       # 完整摘要产物的有界持久缓存
 │   └── file_data.py           # UUID 命名的表格原文件存储
 ├── tools/
 │   ├── __init__.py
@@ -133,12 +134,13 @@ ai-agent/
 │   ├── webpage_summary.py     # 长网页分段归纳与有界阅读结果
 │   ├── document_summary.py    # 完整扫描与分段摘要工具
 │   ├── documents.py           # 文档清单与片段检索工具
+│   ├── document_retrieval.py  # 相同窗口上的 BM25、RRF 与去重
 │   ├── semantic_search.py     # 本地模型向量检索
 │   ├── analyze_spreadsheet.py # Excel/CSV 完整数据分析
 │   ├── analyze_image.py       # 已上传图片理解
 │   ├── generate_image.py      # 文生图工具
 │   └── calculate.py           # 有理数精确计算
-├── tests/                     # 生图接口与聊天流程离线回归
+├── tests/                     # 文档检索、全文摘要与聊天流程离线回归
 └── static/
     ├── index.html             # 页面结构
     ├── styles.css             # 页面样式
@@ -191,10 +193,12 @@ flowchart TD
 | [agent/state.py](agent/state.py) | `AgentState`、`AgentContext`、`AgentResult`、`initial_state()` | 分离本轮可变状态与服务端配置，每次请求创建独立容器，定义两轮三次调用预算 |
 | [agent/tool_registry.py](agent/tool_registry.py) | `build_tools()` | 注册 `StructuredTool`，复用原描述、参数模型和业务函数，注入文件范围、问题与进度回调 |
 | [agent/prompts.py](agent/prompts.py) | `SYSTEM_PROMPT` | 集中维护助手角色、处理任务、证据使用和输出要求；提示词描述能力不等于代码已经实现能力 |
-| [tools/documents.py](tools/documents.py) | `DOCUMENT_TOOL`、`DocumentSearchArguments`、`available_documents()`、`search_documents()`、`retrieve()` | 提供文件清单；只在 Agent 调用工具后加载指定范围的分块，按关键词与中文相邻双字评分并选取片段 |
-| [tools/document_summary.py](tools/document_summary.py) | `SUMMARY_TOOL`、`DocumentSummaryArguments`、`summarize_document()`、`SummaryResult` | 完整读取已提取正文，定位章节、分段归纳、逐级合并，返回覆盖统计、进度和内部模型用量 |
+| [tools/documents.py](tools/documents.py) | `DOCUMENT_TOOL`、`DocumentSearchArguments`、`available_documents()`、`search_documents()`、`retrieve()` | 提供文件清单；一次加载会话分块并进行混合召回，返回实际方法、降级提示和原文窗口 |
+| [tools/document_retrieval.py](tools/document_retrieval.py) | `passages()`、`rank_bm25()`、`fuse_rankings()`、`select_distinct()` | 统一窗口、标准 BM25、按排名 RRF 融合及同文件去重 |
+| [tools/document_summary.py](tools/document_summary.py) | `SUMMARY_TOOL`、`DocumentSummaryArguments`、`summarize_document()`、`SummaryResult` | 完整 Map、按预算 Reduce、直接最终回答或紧凑素材，返回覆盖统计、进度与真实用量 |
+| [storage/summary_cache.py](storage/summary_cache.py) | `read()`、`write()` | 按 UUID 和内容指纹缓存成功产物，原子写入、7 天有效期及每文件 8 项限制 |
 
-`agent/llm.py` 每次调用使用异步上下文管理器创建和关闭客户端；默认超时 60 秒，最多重试一次，输出上限 `max_tokens=2048`。摘要分段归纳与中间合并提高到 4096，最终摘要及外层综合回答为 8192。摘要内部单次请求超时 180 秒，不自动重试网络错误，等待期间每 15 秒报告进度。`LLMReply` 保留 `finish_reason`。正文和工具调用同时为空会转换为 `LLMResponseError`。有效工具调用要求 `tool_calls` 结束原因；不完整或截断的工具参数不会执行。普通正文允许 `stop` 或 `length`；摘要分段及中间合并输出截断时缩小输入重试，最终回答截断则报错，不保存未完成的回答。工具循环累计外层及摘要内部各次调用的 Token 用量。当前适配默认的 `deepseek-chat`，未处理独立思考字段。
+`agent/llm.py` 每次调用使用异步上下文管理器创建和关闭客户端；默认超时 60 秒，最多重试一次，输出上限 `max_tokens=2048`。摘要 Map / Reduce 同为 2048，最终摘要或组合任务的综合正文为 8192。摘要内部单次请求超时 180 秒，不自动重试网络错误，等待期间每 15 秒报告进度。`LLMReply` 保留 `finish_reason`。正文和工具调用同时为空会转换为 `LLMResponseError`。有效工具调用要求 `tool_calls` 结束原因；不完整或截断的工具参数不会执行。普通正文允许 `stop` 或 `length`；摘要分段及中间合并输出截断时缩小输入重试，最终回答截断则报错，不保存未完成的回答。工具循环累计本轮真实模型请求的 Token 用量，缓存不累计旧用量。当前适配默认的 `deepseek-chat`，未处理独立思考字段。
 
 图只执行模型与工具过程，历史读取和最终数据库提交仍在 `service/chat.py` 中完成。`model → tools → model` 通过条件边循环；工具预算耗尽后取消工具绑定并生成最终回答。`recursion_limit` 仅作为图执行步数的额外保护，不能替代业务调用预算。流式模式只转发 custom 的正文、工具开始、进度和来源，完整结果从节点成功完成后的 updates 读取，因此摘要内部模型的 token 不会混入主回答。
 
@@ -269,7 +273,7 @@ flowchart TD
 | --- | --- | --- |
 | [tools/__init__.py](tools/__init__.py) | 包初始化文件 | 标识 `tools` 包 |
 | [tools/web_search.py](tools/web_search.py) | `_search()`、`web_search()` | 请求 Tavily，限制响应大小，校验返回字段和 URL，裁剪摘要；将网络和上游状态转换为搜索异常 |
-| [tools/semantic_search.py](tools/semantic_search.py) | `SEMANTIC_TOOL`、`semantic_search()` | 延迟加载本地 BGE 模型，将文档拆成短片段进行向量排序，返回命中的原文 |
+| [tools/semantic_search.py](tools/semantic_search.py) | `rank_semantic()`、`semantic_search()` | 延迟加载本地 BGE 模型，对混合检索提供的原文窗口排序；保留独立 Python 入口 |
 | [tools/analyze_spreadsheet.py](tools/analyze_spreadsheet.py) | `SPREADSHEET_TOOL`、`analyze_spreadsheet_file()` | 读取原始工作簿，校验规模，支持工作表清单、预览、概况、等值筛选、分组和排序 |
 | [tools/calculate.py](tools/calculate.py) | `CALCULATE_TOOL`、`calculate()` | AST 白名单解析表达式，使用 Fraction 保留精确值，使用 Decimal 生成展示小数 |
 | [storage/file_data.py](storage/file_data.py) | `save_file_data()`、`get_file_data()` | 原子写入 `.data/files/<UUID>.bin`；元数据事务失败时清理本次原文件 |
@@ -488,9 +492,14 @@ sequenceDiagram
         L-->>S: tool_calls(web_search / search_documents / summarize_document)
         S->>T: 校验参数、文件范围并执行 query
         T-->>S: 网页摘要 / 文档片段 / 分段汇总与覆盖统计
-        S->>L: assistant.tool_calls + role=tool 结果
+        alt 单份文档摘要已生成最终正文
+            Note over S,T: 工具结果直接进入结束路由，不再次调用主模型
+        else 事实问答或组合任务
+            S->>L: assistant.tool_calls + role=tool 紧凑结果
+            L-->>S: 最终回答或后续工具请求
+        end
     end
-    L-->>S: 最终 LLMReply
+    Note over S: 最终 LLMReply 来自主模型或摘要工具
     S->>DB: 事务保存完整问答与文件关联
     DB-->>S: conversation_id
     S-->>R: ChatResult
@@ -507,7 +516,7 @@ sequenceDiagram
 
 1. 首次 `sources` 发送空网页与文档来源，以及 `searched=false`。
 2. `delta` 逐段发送模型正文；模型调用工具时，`tool_start` 的 `reset=true` 清除中间说明，后续事件按工具名称显示查询范围。摘要用 `tool_progress` 发送定位、读取、归纳和合并进度。工具成功后更新来源与 `document_summaries`；`searched` 只标记实际执行过联网搜索。
-3. 收到最终模型回答后，提交原始问题、最终回答和文件关联；中间说明与工具消息不写入会话历史。
+3. 收到主模型或单份摘要工具的最终正文后，提交原始问题、最终回答和文件关联；中间说明与工具消息不写入会话历史。直接摘要的完整正文通过 `delta` 发送一次，随后等待保存成功。
 4. 提交成功才发送 `done`，内容为完整 `ChatResponse`。
 5. 生成或保存出错时发送 `error`，包含逻辑状态码和错误提示。
 
@@ -626,28 +635,32 @@ flowchart LR
 
 `tools/documents.py` 定义文档检索工具。准备阶段由 `available_documents()` 校验文件范围并读取元数据；模型调用 `search_documents` 后才读取正文分块。`query` 为 1–400 字符，`limit` 为 1–4；可选 `file_id` 必须属于当前会话文件清单，省略则检索全部可用文件。模型不能扩大服务端提供的文件范围。
 
-工具使用轻量词法检索：
+工具在相同原文窗口上执行混合检索：
 
 1. 英文、数字、下划线按词提取并转小写。
 2. 连续中文拆成相邻双字，例如“知识库”得到“知识”“识库”。
-3. 为问题词计算分块词频和逆文档频率式权重，词频贡献最多取 3，并按块长度归一。
-4. 一般问题按分数选择最多 4 块；概览 / 总结问题或完全无匹配时，按文件轮流选择开头块。
-5. 每块正文只保留前 700 字符，进入整体上下文预算后还可能被剔除。
+3. 原始块拆为 400 字窗口、相邻重叠 80 字，保留原块编号和 `char_start`；BM25 与向量使用完全相同的窗口。
+4. 标准 BM25 使用 `k1=1.5`、`b=0.75`，包含词频饱和、逆文档频率和平均文档长度归一化；零匹配不补文件开头。
+5. BM25 与 BGE 各召回最多 20 个窗口，RRF 累加 `1 / (60 + rank)`，不直接相加量纲不同的原始分数。
+6. 每个原始分块只保留最佳窗口；同文件的完全重复及近乎完整重叠的正文去重，不跨文件删除相同证据；最多返回 4 项。
 
-这不是向量语义检索，也不是完整标准 BM25。当前会读取所选文件的全部分块再在内存评分。命中内容若出现在块的后部，截取前 700 字符可能丢失相关句子。此工具的概览回退只覆盖少量片段；全文、章节和广泛主题总结应由 Agent 选择 `summarize_document`。
+数据库只读取一次所选文件的分块，排序与本地推理在工作线程中完成。向量模型加载或推理失败时自动降级为 BM25，`retrieval.methods`、`degraded`、`warning` 与工具进度说明实际方法；数据库错误不会伪装成向量故障。无命中返回空列表。全文、章节和广泛主题总结由 Agent 选择 `summarize_document`，普通知识问题直接回答。
 
-返回的 `document_sources` 表示本次实际进入模型上下文的片段，包含 `file_id`、`filename`、`chunk_index`、`location`、`content`。它不证明模型逐项引用或核实过所有片段。
+事实问答的 `document_sources` 表示实际进入模型上下文的窗口，包含 `file_id`、`filename`、`chunk_index`、`location`、`content`、`char_start` 和融合分数。完整摘要的来源为分段处理后的独立引用样例。它们不证明模型逐项核实过全部片段。
 
 ### 9.5 完整范围摘要
 
-`tools/document_summary.py` 提供 `summarize_document(file_id, query)`，文件 ID 必须属于服务端校验后的会话清单；查询范围为 1–400 字符。系统提示要求全文、章节和「员工部分」等广泛主题总结优先使用此工具。
+`tools/document_summary.py` 提供 `summarize_document(file_id, query, final_answer=true)`，文件 ID 必须属于服务端校验后的会话清单；查询范围及格式要求为 1–400 字符。系统提示要求全文、章节和「员工部分」等广泛主题总结优先使用此工具。
 
 1. 定位相关章节：读取文件元数据、解析提示及全部非空分块，识别标题和位置；标题仅辅助定位，不过滤正文。
 2. 分段读取：把每块完整正文分配到约 12000 个 JSON 字符以内的批次，超长块保留偏移并拆分；不截取前 700 字。
-3. 分段总结：逐批调用模型归纳指定范围的主题、关键条件、金额、期限和例外。分段和中间合并启用模型 JSON 输出模式，后端继续校验结构和来源编号。分段输出最多 4096 Token，截断时丢弃不完整结果，把当前输入分成更小批次重试；保留所有文字及偏移，不跳过当前批次。
-4. 合并汇总：所有分段结果参与逐级归纳，合并重复主题。中间合并最多 4096 Token，截断时缩小当前摘要分组重试，不能丢弃整组要点；最终摘要及外层综合回答提高到 8192 Token，避免密集制度条款的回答被截断。
+3. Map 提炼要点：逐批归纳主题、关键条件、金额、期限和例外，只返回 JSON。标题最多 80 字符，每项摘要最多 400 字符，最多 3 个代表性来源；输出上限 2048 Token。后端校验结构和来源编号，截断时拆分当前输入，完整保留所有文字与偏移，不跳过当前批次。
+4. 按需 Reduce：先本地合并完全重复的要点，按实际最终消息长度计算预算。全部要点、位置、原始问题和解析提示能放入 24000 字符预算时直接成文；超出时全部分组参与压缩。组合任务素材每份最多 6000 字符，并根据长问题、已有工具消息及同轮摘要数量进一步分配预算。Reduce 上限 2048 Token，截断时缩小分组重试；压缩后不变小则报错，避免无效循环。
+5. 一次最终成文：`final_answer=true` 返回最终 `LLMReply`，图从工具节点直接结束，普通和 SSE 路径仍由服务层保存后返回。跨文件对比、联网查证、计算等任务使用 `false`；同轮多个工具或已有工具结果时图也强制采用素材模式，只在主 Agent 中最终成文一次，正文上限仍为 8192 Token。引用样例与完整主题清单通过本轮工具产物恢复给界面，不重复占用最终模型输入。
 
-一次摘要工具执行包含全部内部模型调用，不受外层 2 轮 / 3 次预算逐段截断；同文件同范围的重复调用复用本轮结果。内部用量累计到本轮 `usage`，包括截断后重试的请求。最多 128 个最终读取批次、256 次读取尝试、256 次中间合并尝试和 8 层合并；不能继续拆分、最终输出截断、格式异常或超出处理上限会报错，不返回虚假的成功覆盖统计。取消或断开时关闭生成器，停止后续批次。
+一次摘要工具执行包含全部内部模型调用，不受外层 2 轮 / 3 次预算逐段截断。内部用量累计到本轮 `usage`，包括截断后的重试请求；缓存命中不累计旧用量。最多 128 个最终读取批次、256 次读取尝试、256 次中间合并尝试和 8 层合并；失败不返回虚假的成功覆盖统计。取消或断开时关闭生成器，停止后续批次。
+
+`storage/summary_cache.py` 在 `.data/summary_cache/<文件UUID>/<指纹>.json` 持久缓存成功的 Map 产物与最终正文。指纹包括正文及位置、文件名、范围、解析提示、DeepSeek 模型 / 地址、摘要版本与固定预算；最终正文还须匹配原始问题。读取前照常校验会话文件范围及正文指纹，缓存结构和完整处理编号必须通过校验。格式要求变化可复用 Map 后重新成文，最终输出失败不会缓存半段正文。缓存有效期 7 天、每文件最多 8 项、每项最多 4 MiB，采用临时文件原子替换；过期、损坏或不可写时回到正常处理。缓存是可重建的数据，不需要修改 MySQL 表结构；摘要规则变化时应更新 `SUMMARY_CACHE_VERSION`。
 
 JSON 与 SSE 完成响应均包含 `document_summaries`，每项有 `file_id`、`filename`、`query`、`summary`、`sections` 和 `coverage`。覆盖统计包含 `total_chunks`、`processed_chunks`、`total_batches`、`processed_batches`、`all_extracted_text_scanned`、起止位置、相关片段 / 主题数和解析提示。页面显示进度及覆盖范围，少量「摘要引用片段」只作为证据样例；浏览器缓存展示元数据，数据库仍只存最终问答。
 
@@ -659,7 +672,7 @@ JSON 与 SSE 完成响应均包含 `document_summaries`，每项有 `file_id`、
 
 ### 9.7 语义检索、表格分析与精确计算
 
-`semantic_search` 只对文本文档开放，按服务端限定的文件 ID 读取分块，将每块拆成 400 字、重叠 80 字的短片段，计算归一化向量点积。每个原始分块只返回最相关的短片段，最多 4 个；原文位置和 char_start 一起保留。模型按需加载，默认 BAAI/bge-small-zh-v1.5、CPU；`SEMANTIC_MODEL_PATH` 可指定本地模型，`SEMANTIC_DEVICE` 可指定设备。在线请求只加载已有本地权重，准备模型的命令见 README。加载或推理失败回传明确错误，Agent 可改用关键词检索。
+`tools/semantic_search.py` 的 `rank_semantic()` 对混合检索提供的相同窗口计算归一化向量点积；独立 `semantic_search()` Python 入口保留兼容，但默认不再作为第二个文档检索工具向 Agent 开放。正文向量缓存最近 2 个语料集，查询向量单独缓存最近 64 项，避免换查询后重编码全文。模型按需加载，默认 BAAI/bge-small-zh-v1.5、CPU；`SEMANTIC_MODEL_PATH` 可指定本地模型，`SEMANTIC_DEVICE` 可指定设备。在线请求只加载已有本地权重，准备命令见 README。加载或推理失败由混合检索明确降级为 BM25。
 
 `analyze_spreadsheet` 只对表格开放，读取当前会话范围内的原文件。支持 sheets、preview、profile、aggregate；工作表可按索引或名称选择，filters 使用等值 AND 条件，null 选择空值。聚合支持 sum、mean、min、max、count、分组及按统计值排序；limit 只限制展示分组，matched_rows 表示完整匹配行数。整数求和转换成 Python 整数以避免 int64 溢出；常规浮点统计不保证财务小数精确性。最近一个完整工作簿缓存在内存，原文件仍持久保存。
 
@@ -693,7 +706,7 @@ HTTP 响应按 Base64 20 MiB 图片上界及少量元数据限制读取；解码
 
 `static/app.js` 只根据合法图片 UUID 构造本站图片地址，展示原图并支持点击打开大图，图片右上角提供下载按钮。下载链接使用 `?download=true`，与预览链接分别渲染。已保存图片在后续文字或会话提交失败时仍可预览下载；没有 `done` 时不会把半轮问答当作已提交。数据库删除会话时级联删除生图记录，本地原件当前保留，部署备份需包含 `.data/generated/`。
 
-离线回归执行 `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`；覆盖官方请求、错误映射、响应限制、图片校验、下载、工具缓存、取消、JSON/SSE 传递、事务回滚和历史恢复。前端语法检查执行 `node --check static/app.js`。
+当前 `tests/` 的 42 项离线回归覆盖 BM25 / RRF 排序、块尾命中、向量降级、真实覆盖统计、截断拆分、按需合并、单次最终成文、缓存失效、文件范围、长问题与多文件预算、取消及 JSON / SSE 保存流程。执行 `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`，DeepSeek 响应与数据库写入使用测试模拟；前端语法检查执行 `node --check static/app.js`。本地已有 BGE 权重另行实际验证了“住宿福利”召回“住房补贴”条款。
 
 ## 10. 联网搜索
 

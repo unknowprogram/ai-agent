@@ -12,10 +12,11 @@ from core.exceptions import LLMResponseError
 from tools.analyze_spreadsheet import SPREADSHEET_TOOL, SpreadsheetArguments, analyze_spreadsheet_file
 from tools.analyze_image import IMAGE_TOOL, ImageArguments, analyze_image_file
 from tools.calculate import CALCULATE_TOOL, CalculateArguments, calculate
-from tools.document_summary import SUMMARY_TOOL, DocumentSummaryArguments, SummaryResult, summarize_document
+from tools.document_summary import (
+    SUMMARY_EVIDENCE_CHARS, SUMMARY_TOOL, DocumentSummaryArguments, SummaryResult, summarize_document,
+)
 from tools.documents import DOCUMENT_TOOL, DocumentSearchArguments, search_documents
 from tools.scrape_webpage import SCRAPE_TOOL, ScrapeArguments, read_webpage
-from tools.semantic_search import SEMANTIC_TOOL, SemanticSearchArguments, semantic_search
 from tools.web_search import SEARCH_TOOL, SearchArguments, web_search
 from tools.webpage_summary import WebpageResult
 from tools.generate_image import GENERATE_IMAGE_TOOL, GenerateImageArguments, generate_image
@@ -31,28 +32,30 @@ def _scope(file_id: UUID | None, allowed_ids: list[str]) -> list[str]:
     return [str(file_id)]
 
 
-def build_tools(context: AgentContext, progress: Callable[[dict], None]) -> dict[str, StructuredTool]:
+def build_tools(context: AgentContext, progress: Callable[[dict], None], *,
+                summary_evidence_chars: int = SUMMARY_EVIDENCE_CHARS) -> dict[str, StructuredTool]:
     """注册本次请求可用的工具，闭包注入文件范围、当前问题和进度回调。"""
     # adapter 只转换接口与结果结构，计算、检索和文件解析复用 tools/ 原代码。
     def calculate_adapter(expression: str, decimal_places: int = 28) -> dict:
         return {"source_type": "calculation", **calculate(expression, decimal_places)}
 
     async def documents_adapter(query: str, limit: int = 4, file_id: UUID | None = None):
-        results = await search_documents(query, _scope(file_id, context.text_file_ids), limit)
-        return {"source_type": "document", "query": query, "results": results}
-
-    async def semantic_adapter(query: str, limit: int = 4, file_id: UUID | None = None):
-        results = await semantic_search(query, _scope(file_id, context.text_file_ids), limit)
-        return {"source_type": "document", "query": query, "results": results}
+        result = await search_documents(query, _scope(file_id, context.text_file_ids), limit)
+        if result["retrieval"]["degraded"]:
+            progress({"name": "search_documents", "message": result["retrieval"]["warning"]})
+        return result
 
     async def spreadsheet_adapter(file_id: UUID, **kwargs):
         _scope(file_id, context.spreadsheet_ids)
         return await analyze_spreadsheet_file(str(file_id), **kwargs)
 
-    async def summary_adapter(file_id: UUID, query: str):
+    async def summary_adapter(file_id: UUID, query: str, final_answer: bool = True):
         _scope(file_id, context.text_file_ids)
         result = None
-        async with aclosing(summarize_document(query, str(file_id))) as events:
+        async with aclosing(summarize_document(
+            query, str(file_id), final_answer=final_answer, question=context.question,
+            evidence_chars=summary_evidence_chars,
+        )) as events:
             async for name, data in events:
                 await context.check_connected()
                 if name == "progress":
@@ -104,7 +107,6 @@ def build_tools(context: AgentContext, progress: Callable[[dict], None]) -> dict
         # 文本检索与摘要只对文本文档开放，表格统计使用独立的分析工具。
         entries.extend([
             (DOCUMENT_TOOL, DocumentSearchArguments, documents_adapter, True),
-            (SEMANTIC_TOOL, SemanticSearchArguments, semantic_adapter, True),
             (SUMMARY_TOOL, DocumentSummaryArguments, summary_adapter, True),
         ])
     if context.spreadsheet_ids:

@@ -755,7 +755,7 @@
           }
           const prefixes = {
             summarize_document: '正在分段总结文档',
-            search_documents: '正在检索文档',
+            search_documents: '正在混合检索文档',
             semantic_search: '正在进行语义检索',
             analyze_spreadsheet: '正在分析表格',
             analyze_image: '正在识别图片',

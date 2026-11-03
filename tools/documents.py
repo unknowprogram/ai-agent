@@ -1,22 +1,21 @@
-"""上传文档检索工具，范围由服务端限定为当前会话的可用文件。"""
+"""当前会话文档的混合检索，工具选择同时承担问答与摘要的意图分流。"""
 
 import asyncio
-import math
-import re
-from collections import Counter
 from typing import Annotated
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from core.exceptions import SemanticSearchUnavailableError
 from storage import documents
+from tools.document_retrieval import CANDIDATE_LIMIT, fuse_rankings, passages, rank_bm25, select_distinct
 
 
 class DocumentSearchArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=400)]
     limit: int = Field(default=4, ge=1, le=4, strict=True)
-    file_id: UUID | None = Field(default=None, description="可选，只能使用系统提供的当前会话文件 ID；省略则检索全部可用文件")
+    file_id: UUID | None = Field(default=None, description="当前会话文件 ID；省略则检索全部可用文本文档")
 
 
 DOCUMENT_TOOL = {
@@ -24,55 +23,44 @@ DOCUMENT_TOOL = {
     "function": {
         "name": "search_documents",
         "description": (
-            "检索用户上传或当前会话已绑定的文档。用户询问文件内容、制度、条款、"
-            "数据或文件摘要时，先调用此工具取得真实片段，再依据片段回答并标注文件名和位置。"
-            "可结合历史改写 query；返回片段不代表读完全文，概览查询说明覆盖范围。"
+            "查询当前会话文件中的具体条款、事实或数据。内部一次完成 BM25 与向量检索、RRF 融合和去重，"
+            "返回相关原文与真实位置，按文件名和位置引用。可结合历史改写查询。"
+            "向量模型不可用时明确降级为 BM25；片段不代表全文。"
+            "全文、章节或广泛主题总结使用 summarize_document；通用知识问题直接回答。"
         ),
         "parameters": DocumentSearchArguments.model_json_schema(),
     },
 }
 
 
-def _tokens(text: str) -> list[str]:
-    tokens = re.findall(r"[a-z0-9_]+", text.lower())
-    for sequence in re.findall(r"[\u4e00-\u9fff]+", text):
-        tokens.extend(sequence[index:index + 2] for index in range(len(sequence) - 1))
-        if len(sequence) == 1:
-            tokens.append(sequence)
-    return tokens
-
-
 def retrieve(question: str, chunks: list[dict], limit: int = 4) -> list[dict]:
-    """选择相关片段；概览类问题按文件轮流选取开头，不能视为全文总结。"""
-    if not chunks:
-        return []
-    terms = set(_tokens(question))
-    counts = [Counter(_tokens(item["content"])) for item in chunks]
-    frequency = Counter(term for count in counts for term in terms if term in count)
-    scores = []
-    for index, (item, count) in enumerate(zip(chunks, counts)):
-        score = sum(
-            math.log(1 + len(chunks) / (1 + frequency[term])) * min(count[term], 3)
-            for term in terms if term in count
-        ) / (1 + len(item["content"]) / 1000)
-        scores.append((score, index, item))
-    overview = bool(re.search(r"总结|概括|概览|主要内容|summary|summarize", question, re.I))
-    if overview or not any(score > 0 for score, _, _ in scores):
-        groups = {}
-        for item in chunks:
-            groups.setdefault(item["file_id"], []).append(item)
-        selected = []
-        offset = 0
-        while len(selected) < limit:
-            row = [group[offset] for group in groups.values() if len(group) > offset]
-            if not row:
-                break
-            selected.extend(row[:limit - len(selected)])
-            offset += 1
+    """保留独立 BM25 入口，返回实际命中的窗口，不截取原始块开头。"""
+    return select_distinct(rank_bm25(question, passages(chunks)), limit)
+
+
+def _hybrid_retrieve(query: str, chunks: list[dict], limit: int) -> dict:
+    # 延迟导入和加载本地向量模型，普通聊天与完整摘要不依赖其启动。
+    from tools.semantic_search import rank_semantic
+
+    items = passages(chunks)
+    lexical = rank_bm25(query, items)
+    methods = ["bm25"]
+    warning = None
+    if items:
+        try:
+            semantic = rank_semantic(query, items, CANDIDATE_LIMIT)
+        except SemanticSearchUnavailableError:
+            semantic = []
+            warning = "向量模型不可用，本次仅使用 BM25 关键词检索；未执行成功的语义检索不能作为证据。"
+        else:
+            methods.append("vector")
     else:
-        selected = [item for _, _, item in sorted(scores, key=lambda row: (-row[0], row[1]))[:limit]]
-    # 给系统规则和历史留出空间；只返回实际可发送的片段长度。
-    return [{**item, "content": item["content"][:700]} for item in selected]
+        semantic = []
+    return {
+        "source_type": "document", "query": query,
+        "retrieval": {"methods": methods, "fusion": "rrf", "degraded": bool(warning), "warning": warning},
+        "results": select_distinct(fuse_rankings(lexical, semantic), limit),
+    }
 
 
 async def available_documents(conversation_id: str | None, file_ids: list[str]) -> tuple[list[str], list[dict]]:
@@ -82,7 +70,11 @@ async def available_documents(conversation_id: str | None, file_ids: list[str]) 
     return ids, metadata
 
 
-async def search_documents(query: str, file_ids: list[str], limit: int = 4) -> list[dict]:
-    """仅在 Agent 调用工具时加载并检索服务端提供的文件范围。"""
+async def search_documents(query: str, file_ids: list[str], limit: int = 4) -> dict:
+    """只读取一次当前会话正文，在工作线程完成两路召回与融合。"""
+    if not query.strip() or len(query) > 400:
+        raise ValueError("query 必须是 1～400 个字符。")
+    if type(limit) is not int or not 1 <= limit <= 4:
+        raise ValueError("limit 必须是 1～4 的整数。")
     chunks = await asyncio.to_thread(documents.get_document_chunks, file_ids)
-    return await asyncio.to_thread(retrieve, query, chunks, limit)
+    return await asyncio.to_thread(_hybrid_retrieve, query, chunks, limit)

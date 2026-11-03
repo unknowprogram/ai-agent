@@ -57,6 +57,8 @@ class AgentState(TypedDict):
     # 保留 assistant.tool_calls 与 tool.tool_call_id 的完整配对。
     tool_messages: list[dict]
     sources: list[dict[str, str]]
+    # 摘要引用样例独立于紧凑工具消息，不重复占用最终模型输入。
+    summary_sources: list[dict]
     generated_images: list[dict]
     searched: bool
     call_count: int
@@ -68,14 +70,14 @@ class AgentState(TypedDict):
     # messages 是本次实际发送给模型、已按预算裁剪过的消息。
     messages: list[dict]
     enabled_tools: list[str]
-    # 只有模型产生最终正文时才设置 result；工具中间过程不入库。
+    # 主模型回答或摘要工具产出最终正文后设置 result；中间过程不入库。
     result: AgentResult | None
 
 
 def initial_state() -> AgentState:
     # 每次请求创建独立容器，避免并发请求共享工具缓存与来源。
     return {
-        "tool_messages": [], "sources": [], "generated_images": [], "searched": False,
+        "tool_messages": [], "sources": [], "summary_sources": [], "generated_images": [], "searched": False,
         "call_count": 0, "round_index": 0, "cache": {}, "total_usage": None,
         "answer": None, "messages": [], "enabled_tools": [], "result": None,
     }
