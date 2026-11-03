@@ -13,6 +13,46 @@ class VisionConfigError(RuntimeError):
     """SenseNova 视觉模型配置缺失或无效。"""
 
 
+class ImageGenerationError(RuntimeError):
+    """图片生成服务连接失败或暂时不可用。"""
+
+
+class ImageGenerationConfigError(ImageGenerationError):
+    """生图服务端配置缺失或无效。"""
+
+
+class ImageGenerationAuthenticationError(ImageGenerationError):
+    """生图密钥无效或模型未开通。"""
+
+
+class ImageGenerationRateLimitError(ImageGenerationError):
+    """生图请求频率或账户额度受限。"""
+
+
+class ImageGenerationTimeoutError(ImageGenerationError):
+    """等待图片生成超时。"""
+
+
+class ImageGenerationRejectedError(ImageGenerationError):
+    """上游拒绝了图片生成请求。"""
+
+
+class ImageGenerationResponseError(ImageGenerationError):
+    """上游没有返回完整、有效的图片。"""
+
+
+class ImageGenerationStorageError(ImageGenerationError):
+    """本地生成图片存储不可用。"""
+
+
+class ImageGenerationSchemaError(ImageGenerationStorageError):
+    """MySQL 生图关联表尚未初始化。"""
+
+
+class GeneratedImageNotFoundError(RuntimeError):
+    """生成图片不存在或原件已缺失。"""
+
+
 class SearchError(RuntimeError):
     """搜索服务连接失败或返回无效结果。"""
 

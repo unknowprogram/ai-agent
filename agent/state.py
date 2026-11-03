@@ -22,6 +22,7 @@ class AgentResult:
     searched: bool
     document_sources: list[dict]
     document_summaries: list[dict]
+    generated_images: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class AgentState(TypedDict):
     # 保留 assistant.tool_calls 与 tool.tool_call_id 的完整配对。
     tool_messages: list[dict]
     sources: list[dict[str, str]]
+    generated_images: list[dict]
     searched: bool
     call_count: int
     round_index: int
@@ -73,7 +75,7 @@ class AgentState(TypedDict):
 def initial_state() -> AgentState:
     # 每次请求创建独立容器，避免并发请求共享工具缓存与来源。
     return {
-        "tool_messages": [], "sources": [], "searched": False,
+        "tool_messages": [], "sources": [], "generated_images": [], "searched": False,
         "call_count": 0, "round_index": 0, "cache": {}, "total_usage": None,
         "answer": None, "messages": [], "enabled_tools": [], "result": None,
     }

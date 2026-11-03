@@ -36,6 +36,7 @@ async def create_chat(request: ChatRequest) -> ChatResponse:
         document_sources=result.document_sources,
         searched=result.searched,
         document_summaries=result.document_summaries or [],
+        generated_images=result.generated_images or [],
     )
 
 
@@ -47,7 +48,7 @@ def _event(name: str, data: dict) -> str:
     "/chat/stream", response_class=StreamingResponse,
     responses={
         **ERROR_RESPONSES,
-        200: {"description": "SSE 事件流：tool_start、tool_progress、sources、delta、done 或 error", "content": {"text/event-stream": {"schema": {"type": "string"}}}},
+        200: {"description": "SSE 事件流：tool_start、tool_progress、sources、generated_images、delta、done 或 error", "content": {"text/event-stream": {"schema": {"type": "string"}}}},
     },
 )
 async def create_chat_stream(request: ChatRequest, http_request: Request):

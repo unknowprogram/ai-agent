@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from schemas.search import SearchResult
 from schemas.files import DocumentSource, DocumentSummary
+from schemas.images import GeneratedImage
 
 MessageText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
 
@@ -49,3 +50,4 @@ class ChatResponse(BaseModel):
     searched: bool = Field(default=False, description="本轮是否实际成功执行过联网搜索，空结果也为 true")
     document_sources: list[DocumentSource] = Field(default_factory=list, description="Agent 实际调用文档检索工具并加入模型上下文的文件片段")
     document_summaries: list[DocumentSummary] = Field(default_factory=list, description="分段扫描全部已提取文字后汇总的摘要及实际覆盖统计")
+    generated_images: list[GeneratedImage] = Field(default_factory=list, description="本轮生成并保存的图片，包含本地预览地址和独立生图用量")

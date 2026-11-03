@@ -31,9 +31,13 @@ def trim_context(history: list[dict[str, str]], message: str) -> list[dict[str, 
     return context
 
 
-async def save_turn(context: MemoryContext, message: str, reply: str, file_ids: list[str] | None = None) -> str:
+async def save_turn(
+    context: MemoryContext, message: str, reply: str, file_ids: list[str] | None = None,
+    *, generated_images: list[dict] | None = None,
+) -> str:
     return await asyncio.to_thread(
         mysql.save_turn, context.conversation_id, message, reply,
         expected_message_id=context.last_message_id, initial_history=context.history,
         file_ids=file_ids,
+        generated_images=generated_images,
     )

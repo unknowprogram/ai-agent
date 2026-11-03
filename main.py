@@ -11,6 +11,7 @@ from router.chat import router as chat_router
 from router.search import router as search_router
 from router.conversations import router as conversations_router
 from router.files import router as files_router
+from router.images import router as images_router
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -20,6 +21,7 @@ app.include_router(chat_router)
 app.include_router(search_router)
 app.include_router(conversations_router)
 app.include_router(files_router)
+app.include_router(images_router)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 

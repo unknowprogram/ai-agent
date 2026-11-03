@@ -79,7 +79,7 @@
 ai-agent/
 ├── main.py                    # 应用入口
 ├── requirements.txt           # Python 依赖
-├── agent_db.sql               # 五张业务表的统一初始化脚本
+├── agent_db.sql               # 六张业务表的统一初始化脚本
 ├── README.md                  # 快速使用说明
 ├── DEVELOPMENT.md             # 本开发文档
 ├── .env                       # 本地配置，包含密钥，不提交版本库
@@ -87,6 +87,8 @@ ai-agent/
 ├── agent/
 │   ├── __init__.py
 │   ├── llm.py                 # 模型调用
+│   ├── vision.py              # SenseNova 图片理解
+│   ├── image_generation.py    # SenseNova U1.5 Lite 文生图
 │   ├── runner.py              # 图事件与原服务接口的适配
 │   ├── graph.py               # 模型/工具节点、条件边和业务预算
 │   ├── state.py               # 图状态与服务端请求上下文
@@ -101,6 +103,7 @@ ai-agent/
 │   ├── chat.py                # 聊天与 SSE 接口
 │   ├── conversations.py       # 会话管理接口
 │   ├── files.py               # 文件上传与查询接口
+│   ├── images.py              # 生成图片预览与下载
 │   └── search.py              # 独立搜索接口
 ├── schemas/
 │   ├── __init__.py
@@ -108,17 +111,20 @@ ai-agent/
 │   ├── conversation.py
 │   ├── error.py
 │   ├── files.py
+│   ├── images.py              # 生成图片元数据与尺寸约束
 │   └── search.py
 ├── service/
 │   ├── __init__.py
 │   ├── chat.py                # 聊天业务编排
 │   ├── context.py             # 上下文预算与消息构建
 │   ├── files.py               # 文件解析与分块
+│   ├── images.py              # 图片校验与视觉输入预处理
 │   └── memory.py              # 异步会话记忆适配层
 ├── storage/
 │   ├── __init__.py
 │   ├── mysql.py               # 连接、事务、会话与消息存储
 │   ├── documents.py           # 文档与分块存储
+│   ├── generated_images.py    # 生图原件及消息关联
 │   └── file_data.py           # UUID 命名的表格原文件存储
 ├── tools/
 │   ├── __init__.py
@@ -129,7 +135,10 @@ ai-agent/
 │   ├── documents.py           # 文档清单与片段检索工具
 │   ├── semantic_search.py     # 本地模型向量检索
 │   ├── analyze_spreadsheet.py # Excel/CSV 完整数据分析
+│   ├── analyze_image.py       # 已上传图片理解
+│   ├── generate_image.py      # 文生图工具
 │   └── calculate.py           # 有理数精确计算
+├── tests/                     # 生图接口与聊天流程离线回归
 └── static/
     ├── index.html             # 页面结构
     ├── styles.css             # 页面样式
@@ -165,7 +174,7 @@ flowchart TD
 | --- | --- | --- |
 | [main.py](main.py) | 创建 FastAPI 应用；注册异常处理器和四组路由；挂载 `/static`；返回首页和 `/health`；直接执行时启动 Uvicorn | 新增路由需要在此注册；默认监听 `127.0.0.1:8000` |
 | [requirements.txt](requirements.txt) | 声明运行依赖 | 新能力需要新依赖时更新；文档与表格依赖指定最低版本 |
-| [agent_db.sql](agent_db.sql) | 创建会话、消息、文档、分块、关联五张表 | 是当前唯一统一建表入口；没有 `storage/schema.sql` |
+| [agent_db.sql](agent_db.sql) | 创建会话、消息、文档、分块、关联和生成图片六张表 | 是当前唯一统一建表入口；没有 `storage/schema.sql` |
 | [README.md](README.md) | 安装、启动、接口及页面的快速使用说明 | 适合首次运行项目时阅读 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 代码结构、模块职责、调用流程与扩展说明 | 随实际代码维护 |
 | `.env` | 保存模型、搜索、MySQL 连接配置 | 仅说明配置项，不在文档中复制真实密钥 |
@@ -371,7 +380,7 @@ COLLATE utf8mb4_unicode_ci;
 
 ## 6. 数据库设计
 
-五张表均使用 InnoDB、`utf8mb4` 和 `utf8mb4_unicode_ci`。会话与文档主键由 Python 生成 UUID 字符串，消息与分块主键由 MySQL 自增。
+六张表均使用 InnoDB、`utf8mb4` 和 `utf8mb4_unicode_ci`。会话、文档与生成图片主键由 Python 生成 UUID 字符串，消息与分块主键由 MySQL 自增。
 
 ```mermaid
 erDiagram
@@ -379,6 +388,8 @@ erDiagram
     conversations ||--o{ conversation_documents : binds
     documents ||--o{ conversation_documents : used_by
     documents ||--o{ document_chunks : contains
+    conversations ||--o{ generated_images : owns
+    messages ||--o{ generated_images : displays
     conversations {
         varchar id PK
         varchar title
@@ -410,6 +421,20 @@ erDiagram
     conversation_documents {
         varchar conversation_id PK,FK
         varchar document_id PK,FK
+    }
+    generated_images {
+        varchar id PK
+        varchar conversation_id FK
+        bigint message_id FK
+        text prompt
+        varchar model
+        varchar file_type
+        int width
+        int height
+        boolean watermark
+        double elapsed_seconds
+        text usage
+        datetime created_at
     }
 ```
 
@@ -654,6 +679,22 @@ JSON 与 SSE 完成响应均包含 `document_summaries`，每项有 `file_id`、
 
 前端扩展选择与粘贴图片的格式校验，上传阶段提示“校验图片”，发送后显示“正在识别图片”。上传、聊天、SSE 和文件关联接口沿用现有协议，不需要修改 SQL 表结构。部署时仍需保存 MySQL 和 `.data/files/`。
 
+### 9.9 SenseNova U1.5 Lite 文生图
+
+`agent/image_generation.py` 使用独立的 `POST https://token.sensenova.cn/v1/images/generations`，协议依据 [官方文档](https://platform.sensenova.cn/docs#model-u1-5)。默认模型 `sensenova-u1.5-lite`；密钥优先读取 `SENSENOVA_IMAGE_API_KEY`，省略时复用 `SENSENOVA_API_KEY`。`SENSENOVA_IMAGE_BASE_URL` 默认 `https://token.sensenova.cn/v1`，兼容填写完整的生图接口地址；`SENSENOVA_IMAGE_TIMEOUT` 默认 300 秒、范围 1–600。`SENSENOVA_IMAGE_WATERMARK` 和 `SENSENOVA_IMAGE_PROMPT_EXTEND` 均默认 true，并显式传给模型。
+
+`tools/generate_image.py` 定义 `GenerateImageArguments` 和 `generate_image(prompt, size)`，描述限制 1–2000 字符，默认 `1024x1024`；尺寸支持 auto、2K、4K 或 512–4096 内、32 的倍数的具体宽高，长宽比最多 3:1。请求固定 `n=1`、`output_format=png`、`response_format=b64_json`。仅用于文生图；注册表在执行前检查数据库表，图节点每轮最多创建一张，不同参数的再次创建被拒绝，相同参数返回本轮缓存。
+
+HTTP 响应按 Base64 20 MiB 图片上界及少量元数据限制读取；解码后用 Pillow 完整检查图片、实际尺寸和静态格式。原件保持生成时的像素，不经过视觉输入的 JPEG 缩放。`storage/generated_images.py` 按 UUID 原子写入 `.data/generated/<UUID>.bin` 和 `.json`，元数据最后写入，避免暴露不完整文件。预览路由按 UUID 和校验过的实际格式读取，提供正确 MIME、nosniff 与可选下载文件名。
+
+图状态和 `AgentResult` 使用独立的 `generated_images` 列表保存完整描述、实际尺寸、模型、生图耗时和用量；工具消息只保留短元数据。生图用量不会混入现有文字模型计数。`generated_images` SSE 事件在本地保存后发送，前端在最终文字前即可展示卡片；后续状态、正文及中断预览保留该图片。等待过程中每 15 秒发送工具心跳，HTTP 创建请求不自动重试，取消只保证关闭本地等待。
+
+`mysql.save_turn()` 单独插入本轮最终助手消息并取得真实 `lastrowid`，再在同一事务写入 `generated_images`。图片记录包含会话 ID、消息 ID、原始描述、模型、实际格式与尺寸、水印设置、耗时和 JSON 用量；关联与问答共同提交或回滚。`GET /api/conversations/{id}` 为每条助手消息恢复图片元数据，不依赖浏览器缓存。新增表由 `agent_db.sql` 和 `python -m storage.mysql --init` 管理；缺表时普通历史读取返回空图片列表，生图在发起模型请求前提示初始化。
+
+`static/app.js` 只根据合法图片 UUID 构造本站图片地址，展示原图并支持点击打开大图，图片右上角提供下载按钮。下载链接使用 `?download=true`，与预览链接分别渲染。已保存图片在后续文字或会话提交失败时仍可预览下载；没有 `done` 时不会把半轮问答当作已提交。数据库删除会话时级联删除生图记录，本地原件当前保留，部署备份需包含 `.data/generated/`。
+
+离线回归执行 `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`；覆盖官方请求、错误映射、响应限制、图片校验、下载、工具缓存、取消、JSON/SSE 传递、事务回滚和历史恢复。前端语法检查执行 `node --check static/app.js`。
+
 ## 10. 联网搜索
 
 `tools/web_search.py` 向 `https://api.tavily.com/search` 发送 JSON POST，使用服务端 `TAVILY_API_KEY` 作为 Bearer 凭证。
@@ -692,6 +733,7 @@ JSON 与 SSE 完成响应均包含 `document_summaries`，每项有 `file_id`、
 | POST | `/api/search` | 200 | 独立联网搜索 |
 | POST | `/api/files` | 201 | 上传并解析文件 |
 | GET | `/api/files/{file_id}` | 200 | 查询文件解析信息 |
+| GET | `/api/images/{image_id}` | 200 | 预览生成图片，download=true 下载原图 |
 | POST | `/api/conversations` | 201 | 创建空会话 |
 | GET | `/api/conversations` | 200 | 列出最近会话 |
 | GET | `/api/conversations/{conversation_id}` | 200 | 读取会话、消息和文件 |
@@ -961,7 +1003,7 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 | --- | --- |
 | 启动报模块不存在 | 是否用 `.venv` 中的 Python 安装并运行；依赖是否装全 |
 | 上传路由启动报 multipart 相关错误 | `python-multipart` 是否安装 |
-| 503 数据库错误 | MySQL 是否启动；数据库与账号是否存在；密码、端口、权限、五张表是否正确 |
+| 503 数据库错误 | MySQL 是否启动；数据库与账号是否存在；密码、端口、权限、六张表是否正确 |
 | 新增文档表外键创建失败 | 已有表字符集、排序规则与 UUID 字段类型是否一致 |
 | 初始化后旧表字段没有变化 | `CREATE TABLE IF NOT EXISTS` 不修改旧表，需要单独迁移 |
 | 502 模型认证错误 | DeepSeek 密钥是否有效，是否被系统环境变量中的旧值覆盖 |
@@ -1015,4 +1057,4 @@ MySQL 是会话原文的持久化来源，localStorage 用于缓存和补充模�
 
 生产部署应使用独立配置和进程管理，关闭开发重载；如果经过 Nginx 等代理，需确保 SSE 不被缓存或缓冲，并配置合适的读取超时。应用已发送 `Cache-Control: no-cache` 和 `X-Accel-Buffering: no`，仍需确认代理实际生效。
 
-模型、Tavily 和数据库密钥仅由服务端读取，不应写入静态文件或提交到仓库。日志和文档应继续避免复制真实配置。备份至少应覆盖五张业务表和 `.data/files/` 表格原件；`.data/` 已加入 Git 忽略规则。
+模型、Tavily 和数据库密钥仅由服务端读取，不应写入静态文件或提交到仓库。日志和文档应继续避免复制真实配置。备份至少应覆盖六张业务表、`.data/files/` 上传原件和 `.data/generated/` 生图原件；`.data/` 已加入 Git 忽略规则。

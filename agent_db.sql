@@ -71,3 +71,26 @@ CREATE TABLE IF NOT EXISTS conversation_documents (
 ) ENGINE=InnoDB
 DEFAULT CHARSET=utf8mb4
 COLLATE=utf8mb4_unicode_ci;
+
+-- 生成图片与最终助手消息的关联；原件保存在 .data/generated。
+CREATE TABLE IF NOT EXISTS generated_images (
+    id VARCHAR(36) NOT NULL PRIMARY KEY,
+    conversation_id VARCHAR(36) NOT NULL,
+    message_id BIGINT NOT NULL,
+    prompt TEXT NOT NULL,
+    model VARCHAR(128) NOT NULL,
+    file_type VARCHAR(16) NOT NULL,
+    width INT UNSIGNED NOT NULL,
+    height INT UNSIGNED NOT NULL,
+    watermark BOOLEAN NOT NULL DEFAULT TRUE,
+    elapsed_seconds DOUBLE NOT NULL,
+    `usage` TEXT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_generated_images_message (conversation_id, message_id),
+    CONSTRAINT fk_generated_images_conversation
+        FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+    CONSTRAINT fk_generated_images_message
+        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+) ENGINE=InnoDB
+DEFAULT CHARSET=utf8mb4
+COLLATE=utf8mb4_unicode_ci;

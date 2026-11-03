@@ -1,5 +1,6 @@
 """LangChain 工具适配：复用原业务实现，注入服务端文件范围及进度。"""
 
+import asyncio
 from collections.abc import Callable
 from contextlib import aclosing
 from uuid import UUID
@@ -17,6 +18,8 @@ from tools.scrape_webpage import SCRAPE_TOOL, ScrapeArguments, read_webpage
 from tools.semantic_search import SEMANTIC_TOOL, SemanticSearchArguments, semantic_search
 from tools.web_search import SEARCH_TOOL, SearchArguments, web_search
 from tools.webpage_summary import WebpageResult
+from tools.generate_image import GENERATE_IMAGE_TOOL, GenerateImageArguments, generate_image
+from storage.generated_images import check_schema
 
 
 def _scope(file_id: UUID | None, allowed_ids: list[str]) -> list[str]:
@@ -82,9 +85,18 @@ def build_tools(context: AgentContext, progress: Callable[[dict], None]) -> dict
         await context.check_connected()
         return result
 
+    async def generate_image_adapter(prompt: str, size: str = "1024x1024"):
+        await context.check_connected()
+        await asyncio.to_thread(check_schema)
+        await context.check_connected()
+        result = await generate_image(prompt, size)
+        await context.check_connected()
+        return result
+
     entries = [
         (CALCULATE_TOOL, CalculateArguments, calculate_adapter, False),
         (SCRAPE_TOOL, ScrapeArguments, webpage_adapter, True),
+        (GENERATE_IMAGE_TOOL, GenerateImageArguments, generate_image_adapter, True),
     ]
     if context.search_mode is not False:
         entries.append((SEARCH_TOOL, SearchArguments, web_search, True))

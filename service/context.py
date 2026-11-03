@@ -9,7 +9,7 @@ MAX_INPUT_CHARS = 16000  # 容纳接口允许的 8000 字符问题及系统规�
 WEBPAGE_CONTEXT_CHARS = 24000  # 搜索和网页阅读的统一预算
 STRUCTURED_CONTEXT_CHARS = 16000  # 表格统计、精确计算至少使用基础预算
 SUMMARY_CONTEXT_CHARS = 24000  # 文档摘要综合回答的预算
-VISION_CONTEXT_CHARS = 24000  # 图片识别结果与最终回答的预算
+VISION_CONTEXT_CHARS = 24000  # 图片理解、生图工具与最终回答的预算
 MAX_HISTORY_MESSAGES = 20  #  设置最大历史消息数
 MAX_SUMMARY_CHARS = 3000  # 设置最大摘要字符数
 MAX_REFERENCE_COUNT = 5  # 设置最大引用数量
@@ -36,7 +36,7 @@ def context_budget(tool_messages: list[dict] | None = None, searched: bool = Fal
         budget = max(budget, STRUCTURED_CONTEXT_CHARS)
     if "document_summary" in source_types:
         budget = max(budget, SUMMARY_CONTEXT_CHARS)
-    if "image" in source_types or "analyze_image" in tool_names:
+    if source_types & {"image", "generated_image"} or tool_names & {"analyze_image", "generate_image"}:
         budget = max(budget, VISION_CONTEXT_CHARS)
     return budget
 

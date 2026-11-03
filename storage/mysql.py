@@ -109,6 +109,7 @@ def save_turn(
     conversation_id: str | None, message: str, reply: str,
     *, expected_message_id: int = 0, initial_history: list[dict] | None = None,
     file_ids: list[str] | None = None,
+    generated_images: list[dict] | None = None,
 ) -> str:
     """一次事务保存问答；新会话也在此事务中创建，失败时不留下半轮消息。"""
     is_new = conversation_id is None
@@ -138,10 +139,21 @@ def save_turn(
         messages.extend([{"role": "user", "content": message}, {"role": "assistant", "content": reply}])
         if any(item["role"] not in {"user", "assistant"} for item in messages):
             raise ValueError("会话记忆只接收用户和助手消息。")
-        cursor.executemany(
-            "INSERT INTO messages (conversation_id, role, content) VALUES (%s, %s, %s)",
-            [(conversation_id, item["role"], item["content"]) for item in messages],
-        )
+        insert_message = "INSERT INTO messages (conversation_id, role, content) VALUES (%s, %s, %s)"
+        if generated_images:
+            # 单独插入最终助手消息，可靠取得其 ID；图片关联与问答共同提交或回滚。
+            cursor.executemany(
+                insert_message,
+                [(conversation_id, item["role"], item["content"]) for item in messages[:-1]],
+            )
+            cursor.execute(insert_message, (conversation_id, "assistant", reply))
+            from storage.generated_images import save_message_images
+            save_message_images(cursor, conversation_id, cursor.lastrowid, generated_images)
+        else:
+            cursor.executemany(
+                insert_message,
+                [(conversation_id, item["role"], item["content"]) for item in messages],
+            )
         cursor.execute("UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = %s", (conversation_id,))
     return conversation_id
 
@@ -164,6 +176,8 @@ def get_conversation(conversation_id: str, limit: int = 80) -> dict:
             (conversation_id, max(1, min(limit, 100))),
         )
         conversation["messages"] = list(reversed(cursor.fetchall()))
+        from storage.generated_images import load_message_images
+        load_message_images(cursor, conversation["messages"])
     from storage.documents import list_conversation_documents
     conversation["files"] = list_conversation_documents(conversation_id)
     return conversation

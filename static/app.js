@@ -50,6 +50,59 @@
     return Array.isArray(files) ? files.filter(file => file && typeof file.file_id === 'string' && typeof file.filename === 'string').slice(0, 5) : [];
   }
 
+  function normalizeGeneratedImages(images) {
+    if (!Array.isArray(images)) return [];
+    const seen = new Set();
+    return images.filter(image => {
+      if (!image || typeof image.image_id !== 'string'
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(image.image_id)
+        || !Number.isInteger(image.width) || !Number.isInteger(image.height)
+        || image.width < 512 || image.height < 512 || image.width > 4096 || image.height > 4096
+        || !['png', 'jpg', 'webp'].includes(image.file_type)) return false;
+      const id = image.image_id.toLowerCase();
+      if (seen.has(id)) return false;
+      seen.add(id); return true;
+    }).slice(0, 3).map(image => ({
+      image_id: image.image_id.toLowerCase(), url: '/api/images/' + image.image_id.toLowerCase(),
+      prompt: typeof image.prompt === 'string' ? image.prompt.slice(0, 2000) : '',
+      model: typeof image.model === 'string' ? image.model.slice(0, 128) : 'SenseNova',
+      width: image.width, height: image.height, file_type: image.file_type,
+      watermark: image.watermark === true,
+      elapsed_seconds: Number.isFinite(image.elapsed_seconds) && image.elapsed_seconds >= 0 ? image.elapsed_seconds : null,
+    }));
+  }
+
+  function renderGeneratedImages(images) {
+    const section = node('section', 'generated-images');
+    section.setAttribute('aria-label', '生成图片');
+    for (const image of normalizeGeneratedImages(images)) {
+      const card = node('figure', 'generated-image-card');
+      const preview = node('a', 'generated-image-preview');
+      preview.href = image.url; preview.target = '_blank'; preview.rel = 'noopener noreferrer';
+      preview.setAttribute('aria-label', '打开生成图片大图');
+      const bitmap = node('img');
+      bitmap.src = image.url; bitmap.alt = image.prompt || 'SenseNova 生成的图片';
+      bitmap.width = image.width; bitmap.height = image.height;
+      bitmap.loading = 'lazy'; bitmap.decoding = 'async';
+      bitmap.addEventListener('error', () => {
+        bitmap.hidden = true;
+        if (!card.querySelector('.generated-image-error')) {
+          card.append(node('p', 'generated-image-error', '图片暂时无法加载，请稍后重新打开。'));
+        }
+      });
+      preview.append(bitmap);
+      const download = node('a', 'generated-image-download');
+      download.href = image.url + '?download=true';
+      download.download = 'sensenova-' + image.image_id + '.' + image.file_type;
+      download.title = '下载原图';
+      download.setAttribute('aria-label', '下载原图');
+      download.append(icon('download'));
+      card.append(preview, download);
+      section.append(card);
+    }
+    return section;
+  }
+
   function normalizeDocumentSources(sources) {
     return Array.isArray(sources) ? sources.filter(source => source && typeof source.file_id === 'string' && typeof source.filename === 'string' && typeof source.content === 'string').slice(0, 12) : [];
   }
@@ -157,7 +210,7 @@
         stagedFiles: normalizeFiles(session.stagedFiles),
         title: typeof session.title === 'string' ? session.title.slice(0, 80) : '未命名对话',
         messages: session.messages.filter((message) => message && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string')
-          .slice(-80).map((message) => ({ ...message, content: message.content.slice(0, 64000), sources: normalizeSources(message.sources), files: normalizeFiles(message.files) })),
+          .slice(-80).map((message) => ({ ...message, content: message.content.slice(0, 64000), sources: normalizeSources(message.sources), files: normalizeFiles(message.files), generatedImages: normalizeGeneratedImages(message.generatedImages) })),
       }));
       state.activeId = state.sessions.some((session) => session.id === saved.activeId) ? saved.activeId : null;
       state.newFiles = normalizeFiles(saved.newFiles);
@@ -199,7 +252,7 @@
     session.stagedFiles = normalizeFiles(session.stagedFiles).filter(file => !session.files.some(bound => bound.file_id === file.file_id));
     session.messages = data.messages.filter((message) => ['user', 'assistant'].includes(message.role)).map((message) => {
       const previous = cached.get(`${message.role}\0${message.content}`)?.shift();
-      return { ...previous, role: message.role, content: message.content, databaseId: message.id, sources: normalizeSources(previous?.sources) };
+      return { ...previous, role: message.role, content: message.content, databaseId: message.id, sources: normalizeSources(previous?.sources), generatedImages: normalizeGeneratedImages(message.generated_images) };
     });
   }
 
@@ -462,6 +515,8 @@
       thinking.setAttribute('role', 'status'); body.append(thinking);
     } else {
       body.append(markdown(message.content));
+      const generatedImages = normalizeGeneratedImages(message.generatedImages);
+      if (generatedImages.length) body.append(renderGeneratedImages(generatedImages));
       if (message.incomplete) body.append(node('p', 'incomplete-note', '输出已中断 · 保存状态未确认，可重新加载会话查看'));
       const sources = normalizeSources(message.sources);
       if (sources.length) body.append(renderSources(sources));
@@ -507,7 +562,7 @@
     else if (state.preview && state.preview.sessionId === state.activeId) {
       messages.push(
         { role: 'user', content: state.preview.question, files: state.preview.files },
-        { role: 'assistant', content: state.preview.content, sources: state.preview.sources, usedSearch: state.preview.usedSearch, incomplete: true },
+        { role: 'assistant', content: state.preview.content, sources: state.preview.sources, usedSearch: state.preview.usedSearch, generatedImages: state.preview.generatedImages, incomplete: true },
       );
     }
     elements.welcome.hidden = messages.length > 0;
@@ -630,16 +685,20 @@
     elements.error.hidden = true;
     renderSidebar(); updateInput(); renderConversation({ role: 'user', content: message, files: messageFiles });
     const outputBody = elements.messages.lastElementChild.querySelector('.assistant-body');
-    const partial = { text: '', sources: [], searched: false };
+    const partial = { text: '', sources: [], searched: false, generatedImages: [] };
     let liveText;
     let paintFrame;
     let result;
+    function renderLiveOutput(content) {
+      outputBody.replaceChildren(content);
+      if (partial.generatedImages.length) outputBody.append(renderGeneratedImages(partial.generatedImages));
+    }
     function appendText(text) {
       if (typeof text !== 'string') throw new Error('回答片段格式不正确。');
       partial.text += text;
       if (!liveText) {
         liveText = node('div', 'prose streaming-text');
-        outputBody.replaceChildren(liveText);
+        renderLiveOutput(liveText);
         outputBody.parentElement.setAttribute('aria-busy', 'true');
       }
       if (paintFrame) return;
@@ -684,6 +743,11 @@
             outputBody.parentElement.querySelector('.assistant-heading').append(badge);
           }
         }
+        else if (name === 'generated_images') {
+          partial.generatedImages = normalizeGeneratedImages(data.generated_images);
+          if (liveText) renderLiveOutput(liveText);
+          else renderLiveOutput(node('div', 'thinking', '图片已生成，正在整理回复……'));
+        }
         else if (name === 'tool_start') {
           if (data.reset) {
             if (paintFrame) cancelAnimationFrame(paintFrame);
@@ -695,6 +759,7 @@
             semantic_search: '正在进行语义检索',
             analyze_spreadsheet: '正在分析表格',
             analyze_image: '正在识别图片',
+            generate_image: '正在生成图片',
             calculate: '正在精确计算',
             web_search: '正在搜索网页',
             scrape_webpage: '正在阅读网页',
@@ -703,12 +768,12 @@
           const label = typeof data.query === 'string' && data.query ? `${prefix}：${data.query}` : '正在准备查询资料……';
           const status = node('div', 'thinking', label);
           status.setAttribute('role', 'status');
-          outputBody.replaceChildren(status);
+          renderLiveOutput(status);
         }
         else if (name === 'tool_progress') {
           const status = node('div', 'thinking', typeof data.message === 'string' ? data.message : '正在处理文档……');
           status.setAttribute('role', 'status');
-          outputBody.replaceChildren(status);
+          renderLiveOutput(status);
         }
         else if (name === 'delta') appendText(data.text);
         else if (name === 'error') {
@@ -727,7 +792,7 @@
       $('#upload-status').hidden = true;
       session.messages.push(
         { role: 'user', content: message, files: messageFiles },
-        { role: 'assistant', content: data.reply, sources: normalizeSources(data.sources), documentSources: normalizeDocumentSources(data.document_sources), documentSummaries: normalizeDocumentSummaries(data.document_summaries), model: data.model, usage: data.usage, usedSearch: data.searched === true },
+        { role: 'assistant', content: data.reply, sources: normalizeSources(data.sources), documentSources: normalizeDocumentSources(data.document_sources), documentSummaries: normalizeDocumentSummaries(data.document_summaries), generatedImages: normalizeGeneratedImages(data.generated_images), model: data.model, usage: data.usage, usedSearch: data.searched === true },
       );
       session.messages = session.messages.slice(-80);
       state.sessions = [session, ...state.sessions.filter((item) => item.id !== session.id)].slice(0, 20);
@@ -736,8 +801,8 @@
     } catch (error) {
       retryMessage = message;
       if (created) { state.newFiles = session.stagedFiles; state.sessions = state.sessions.filter((item) => item.id !== session.id); state.activeId = null; }
-      if (partial.text) {
-        state.preview = { sessionId: state.activeId, question: message, files: messageFiles, content: partial.text, sources: partial.sources, usedSearch: partial.searched };
+      if (partial.text || partial.generatedImages.length) {
+        state.preview = { sessionId: state.activeId, question: message, files: messageFiles, content: partial.text, sources: partial.sources, usedSearch: partial.searched, generatedImages: partial.generatedImages };
       }
       if (controller.signal.aborted && controller.signal.reason === 'user') toast('已停止接收。');
       else if (controller.signal.aborted) showError('等待回答超时，请稍后重试。');

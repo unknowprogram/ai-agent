@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, StringConstraints, Field
 from schemas.files import DocumentInfo
+from schemas.images import GeneratedImage
 
 
 class ConversationCreate(BaseModel):
@@ -28,6 +29,7 @@ class StoredMessage(BaseModel):
     role: Literal["user", "assistant", "system", "tool"]
     content: str
     created_at: datetime
+    generated_images: list[GeneratedImage] = Field(default_factory=list)
 
 
 class ConversationDetail(ConversationSummary):

@@ -180,6 +180,14 @@ textarea:focus-visible { outline: none; }
 .icon-button:hover { background: #eeefe6; color: #67725a; }
 .answer-actions .icon { width: 14px; height: 14px; }
 .answer-meta { font-size: 9px; color: #aaaF9e; }
+.generated-images { display: grid; gap: 14px; margin: 16px 0; }
+.generated-image-card { position: relative; margin: 0; max-width: 560px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #fdfdf8; }
+.generated-image-preview { display: block; background: #f0f2e8; }
+.generated-image-preview img { display: block; width: 100%; height: auto; }
+.generated-image-download { position: absolute; top: 12px; right: 12px; z-index: 1; display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); text-decoration: none; }
+.generated-image-download:hover { color: var(--accent); }
+.generated-image-download .icon { width: 18px; height: 18px; }
+.generated-image-error { margin: 12px 14px; color: #9b6647; font-size: 11px; }
 .sources { border-top: 1px solid var(--line); margin-top: 22px; padding-top: 15px; }
 .sources-title { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #919884; margin-bottom: 11px; }
 .sources-title .icon { width: 13px; height: 13px; }

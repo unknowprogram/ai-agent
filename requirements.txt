@@ -1,6 +1,7 @@
 
 # 大模型 API
 openai
+httpx>=0.27,<1
 # LangChain 消息/工具接口、OpenAI 兼容模型适配，以及 LangGraph 状态图
 langchain-core>=1,<2
 langchain-openai>=1,<2

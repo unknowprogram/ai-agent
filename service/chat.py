@@ -22,6 +22,7 @@ class ChatResult:
     document_sources: list[dict]
     searched: bool = False
     document_summaries: list[dict] | None = None
+    generated_images: list[dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ async def chat(
         message,
         answer.reply,
         prepared.file_ids,
+        generated_images=result.generated_images,
     )
 
     return ChatResult(
@@ -126,6 +128,7 @@ async def chat(
         document_sources=result.document_sources,
         searched=result.searched,
         document_summaries=result.document_summaries,
+        generated_images=result.generated_images,
     )
 
 
@@ -149,11 +152,15 @@ async def stream_chat(
                 yield name, data
             else:
                 answer = data.answer
-                saved_id = await save_turn(prepared.memory, message, answer.reply, prepared.file_ids)
+                saved_id = await save_turn(
+                    prepared.memory, message, answer.reply, prepared.file_ids,
+                    generated_images=data.generated_images,
+                )
                 yield "done", {
                     "conversation_id": saved_id, "reply": answer.reply,
                     "model": answer.model, "usage": answer.usage,
                     "sources": data.sources, "searched": data.searched,
                     "document_sources": data.document_sources,
                     "document_summaries": data.document_summaries,
+                    "generated_images": data.generated_images,
                 }

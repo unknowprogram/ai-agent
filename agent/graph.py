@@ -211,6 +211,7 @@ async def model_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
         update["result"] = AgentResult(
             LLMReply(answer.reply, answer.model, usage, finish_reason=answer.finish_reason),
             state["sources"], messages, state["searched"], _document_sources(messages), summaries,
+            generated_images=deepcopy(state["generated_images"]),
         )
     elif not registry:
         raise LLMResponseError()
@@ -221,7 +222,7 @@ async def _invoke_tool(tool, arguments: dict, context: AgentContext, progress):
     # 原说明：调用 LangChain 工具，为本地推理和表格统计补充心跳并清理取消的任务。
     """调用工具，为本地推理、表格统计和视觉识别补充心跳及取消处理。"""
     # 原实现：if tool.name not in {"semantic_search", "analyze_spreadsheet"}:
-    if tool.name not in {"semantic_search", "analyze_spreadsheet", "analyze_image"}:
+    if tool.name not in {"semantic_search", "analyze_spreadsheet", "analyze_image", "generate_image"}:
         return await tool.ainvoke(arguments)
     task = asyncio.create_task(tool.ainvoke(arguments))
     try:
@@ -229,7 +230,10 @@ async def _invoke_tool(tool, arguments: dict, context: AgentContext, progress):
             done, _ = await asyncio.wait({task}, timeout=15)
             await context.check_connected()
             if not done:
-                progress({"name": tool.name, "message": "工具仍在处理，请稍候……"})
+                progress({
+                    "name": tool.name,
+                    "message": "图片仍在生成，请稍候……" if tool.name == "generate_image" else "工具仍在处理，请稍候……",
+                })
         return await task
     finally:
         if not task.done():
@@ -246,6 +250,7 @@ async def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     registry = build_tools(context, progress)
     tool_messages = deepcopy(state["tool_messages"])
     sources = deepcopy(state["sources"])
+    generated_images = deepcopy(state["generated_images"])
     cache = dict(state["cache"])
     call_count, searched, usage = state["call_count"], state["searched"], state["total_usage"]
     answer = state["answer"]
@@ -283,14 +288,21 @@ async def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
                         scope = context.text_file_ids
                     if requested_id and str(requested_id) not in scope:
                         data = {"error": "该文件不在当前会话范围，只能使用系统提供的文件清单。"}
+                    if (
+                        call.name == "generate_image" and generated_images
+                        and (call.name, arguments.model_dump_json()) not in cache
+                    ):
+                        data = {"error": "本轮已经生成一张图片。如需重新生成，请在下一条消息中提出。"}
         if data is None:
             query = (
                 getattr(arguments, "query", None) or getattr(arguments, "expression", None)
+                or getattr(arguments, "prompt", None)
                 or getattr(arguments, "url", None)
             )
             if query is None:
                 query = context.file_metadata[str(arguments.file_id)]["filename"] + " / " + arguments.operation
-            writer(("tool_start", {"name": call.name, "query": query, "reset": False}))
+            display_query = query[:160] + "…" if call.name == "generate_image" and len(query) > 160 else query
+            writer(("tool_start", {"name": call.name, "query": display_query, "reset": False}))
             # 参数保留大小写，避免把不同表名、列名或筛选值误认为相同调用。
             key = (call.name, arguments.model_dump_json())
             try:
@@ -327,6 +339,18 @@ async def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
                             sources.append(source)
                 else:
                     data = deepcopy(result)
+                if data.get("source_type") == "generated_image":
+                    for image in data["images"]:
+                        if not any(item["image_id"] == image["image_id"] for item in generated_images):
+                            generated_images.append(deepcopy(image))
+                    # 原件已保存，此事件允许前端在最终文字回复前展示图片。
+                    writer(("generated_images", {"generated_images": deepcopy(generated_images)}))
+                    # 完整描述及生图用量留在独立结果中，不重复挤占文字模型上下文。
+                    data["images"] = [
+                        {key: image[key] for key in ("image_id", "url", "model", "width", "height", "watermark")}
+                        for image in data["images"]
+                    ]
+                    data["message"] = "图片已生成并展示在界面，可预览和下载。简短说明完成即可，不要推测图片细节。"
             except SemanticSearchUnavailableError:
                 data = {"error": "语义模型未准备好，可改用 search_documents 关键词检索；不能声称语义检索成功。"}
             except (FileDataUnavailableError, FileTooLargeError, FileParseError) as exc:
@@ -351,7 +375,7 @@ async def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
                 "document_summaries": _document_summaries(tool_messages),
             }))
     return {
-        "tool_messages": tool_messages, "sources": sources, "searched": searched,
+        "tool_messages": tool_messages, "sources": sources, "generated_images": generated_images, "searched": searched,
         "call_count": call_count, "round_index": state["round_index"] + 1,
         "cache": cache, "total_usage": usage,
     }

@@ -1,6 +1,6 @@
 # 企业智能助手
 
-基于 FastAPI 和 DeepSeek 的聊天服务，支持文件上传问答、MySQL 会话记忆、多轮上下文、Tavily 联网搜索和 API 文档。
+基于 FastAPI 和 DeepSeek 的聊天服务，支持文件上传问答、SenseNova 图片理解与文生图、MySQL 会话记忆、多轮上下文、Tavily 联网搜索和 API 文档。
 
 当前模型层使用 LangChain `ChatOpenAI`，Agent 流程使用 LangGraph 的 `model → tools → model` 状态图。前端、HTTP/SSE 接口和 MySQL 会话机制保持兼容。
 
@@ -82,6 +82,7 @@ Swagger 中已列出聊天接口的错误状态码及响应结构。
 - `tool_start`：Agent 准备调用工具，`name` 区分 `web_search`、`search_documents`、`summarize_document`、`semantic_search`、`analyze_spreadsheet` 和 `calculate`；`query` 展示查询范围、文件名或表达式；`reset: true` 清除中间说明，等待最终回答。
 - `tool_progress`：摘要工具的章节定位、分段读取 / 归纳、合并进度，包含 `stage`、`message`，分段处理时还有 `completed`、`total`。
 - `sources`：本轮网页来源 `sources`、是否已执行联网搜索 `searched`、文档引用 `document_sources` 及已完成的摘要 `document_summaries`；首次事件来源为空，工具执行后更新。
+- `generated_images`：本轮生成图片的元数据列表；原件已保存，可以预览下载，最终 `done` 确认图片与问答已关联并提交数据库。
 - `delta`：正文片段，数据格式为 `{"text": "回答片段"}`。
 - `done`：模型正常结束且数据库保存成功后，返回完整的 `ChatResponse`。
 - `error`：流开始后的错误，数据包含统一管理的 `status` 和 `detail`。
@@ -98,14 +99,14 @@ Swagger 中已列出聊天接口的错误状态码及响应结构。
 服务读取现有 `MYSQL_*` 配置，也兼容 `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME`；
 同时存在时优先使用 `MYSQL_*`。数据库需已创建，账号需有会话表的读写权限。
 
-会话和文档的五张表统一由根目录 `agent_db.sql` 管理。首次部署或需要补建缺失表时，在项目根目录执行：
+会话、文档和生成图片的六张表统一由根目录 `agent_db.sql` 管理。首次部署或需要补建缺失表时，在项目根目录执行：
 
 ```powershell
 .\.venv\Scripts\python.exe -m storage.mysql --init
 ```
 
 初始化读取 `agent_db.sql`，全部建表语句使用 `CREATE TABLE IF NOT EXISTS`，可重复执行，保留现有表结构和数据。
-脚本包含 `conversations`、`messages`、`documents`、`document_chunks` 和 `conversation_documents`，不包含删表语句。
+脚本包含 `conversations`、`messages`、`documents`、`document_chunks`、`conversation_documents` 和 `generated_images`，不包含删表语句。
 数据库本身需提前创建；已有表的结构变更需要单独迁移。
 
 在 Swagger 中先发送：
@@ -138,7 +139,7 @@ Swagger 中已列出聊天接口的错误状态码及响应结构。
 - `GET /api/conversations/{conversation_id}?limit=80`：按正序读取最近消息，最多 100 条。
 - `DELETE /api/conversations/{conversation_id}`：在同一事务中删除该会话及其消息。
 
-数据库保存角色和消息原文；模型、Token 用量及搜索来源卡片的额外信息目前只在浏览器缓存。
+数据库保存角色、消息原文及生成图片的元数据和消息关联；文字模型、Token 用量及搜索来源卡片的额外信息目前只在浏览器缓存。
 MySQL 同步操作在线程中执行，聊天生成期间不占用数据库连接。
 
 ## 联网搜索
@@ -255,6 +256,38 @@ MySQL 同步操作在线程中执行，聊天生成期间不占用数据库连�
 聊天接口会调用真实模型，需要有效的 DeepSeek 配置和网络连接，并可能产生模型费用。
 联网搜索还会使用 Tavily 账户额度；可先用 `/api/search` 验证搜索，再直接向 Agent 提问最新信息。
 `GET /health` 可用于检查服务是否启动，不调用模型。
+
+## SenseNova U1.5 Lite 文生图
+
+在聊天框输入“生成一张海豹插画，512x512，清晨海面、柔和光线”等要求，DeepSeek 会调用 `generate_image(prompt, size)`。图片保存后即展示，点击图片可以打开大图，右上角的下载按钮可保存原图。每轮最多生成一张，支持文生图。
+
+复用已有的 `SENSENOVA_API_KEY`，默认模型为 `sensenova-u1.5-lite`。可在 `.env` 独立配置：
+
+```dotenv
+SENSENOVA_IMAGE_MODEL=sensenova-u1.5-lite
+SENSENOVA_IMAGE_BASE_URL=https://token.sensenova.cn/v1
+SENSENOVA_IMAGE_TIMEOUT=300
+SENSENOVA_IMAGE_WATERMARK=true
+SENSENOVA_IMAGE_PROMPT_EXTEND=true
+# 需要独立密钥时配置 SENSENOVA_IMAGE_API_KEY，省略则复用 SENSENOVA_API_KEY
+```
+
+升级时执行 `.\.venv\Scripts\python.exe -m storage.mysql --init` 补建 `generated_images`，随后重启服务。工具会在生成前检查表是否存在，缺表时明确提示初始化；已有普通会话仍可读取。
+
+按照 [SenseNova 官方文档](https://platform.sensenova.cn/docs#model-u1-5) 调用 `POST /v1/images/generations`，显式传入 `n=1`、`output_format=png`、`response_format=b64_json`、水印和提示词增强设置。尺寸默认 `1024x1024`，可指定 `auto`、`2K`、`4K`，或 512–4096 内、32 的倍数的宽高，长宽比最多 3:1。生成描述最多 2000 字符；图片原件最多 20 MiB，为项目资源限制。
+
+原件和展示元数据保存在 `.data/generated/<图片UUID>.bin`、`.json`；模型上下文只保留简短元数据。`GET /api/images/{image_id}` 提供预览，加 `?download=true` 下载原图。普通聊天和流式完成响应增加 `generated_images`；会话详情的助手消息同样携带该字段，刷新页面可从 MySQL 恢复图片。生图模型用量单独记录，`ChatResponse.usage` 继续表示文字和图片理解等现有模型的累计用量。
+
+相同参数只在本轮复用结果，HTTP 创建请求不自动重试；再次发送会生成新图片。等待时每 15 秒发送进度心跳。停止接收会关闭本地等待，不保证撤销上游已接受的任务。图片已保存但最终文字生成或数据库提交失败时，页面保留图片预览，问答保存状态以 `done` 或重新加载结果为准。删除会话会级联删除图片关联，本地原件当前保留。
+
+核心代码：`agent/image_generation.py` 调用模型；`tools/generate_image.py` 校验并保存图片；`storage/generated_images.py` 管理原件和消息关联；`schemas/images.py` 定义响应；`router/images.py` 提供图片读取。
+
+离线验证（不会调用真实模型）：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+node --check static/app.js
+```
 
 ## SenseNova 图片理解
 

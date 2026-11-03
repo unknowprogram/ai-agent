@@ -27,6 +27,12 @@ from core.exceptions import (
 
 )
 from schemas.error import ErrorResponse
+from core.exceptions import (
+    GeneratedImageNotFoundError, ImageGenerationAuthenticationError,
+    ImageGenerationConfigError, ImageGenerationError, ImageGenerationRateLimitError,
+    ImageGenerationRejectedError, ImageGenerationResponseError,
+    ImageGenerationSchemaError, ImageGenerationStorageError, ImageGenerationTimeoutError,
+)
 
 # 原实现：from core.exceptions import ContextTooLargeError
 from core.exceptions import ContextTooLargeError, VisionConfigError
@@ -131,6 +137,39 @@ ERROR_SPECS: dict[type[Exception], ErrorSpec] = {
 
 # 保留原有映射便于对比；视觉接入后扩展文件提示。
 ERROR_SPECS.update({
+    ImageGenerationConfigError: ErrorSpec(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "请检查 .env 中的 SENSENOVA_API_KEY（或 SENSENOVA_IMAGE_API_KEY）、"
+        "SENSENOVA_IMAGE_BASE_URL、SENSENOVA_IMAGE_MODEL 和生图超时、布尔配置。",
+    ),
+    ImageGenerationAuthenticationError: ErrorSpec(
+        status.HTTP_502_BAD_GATEWAY, "图片生成认证失败，请检查服务端密钥及 U1.5 Lite 模型权限。",
+    ),
+    ImageGenerationRateLimitError: ErrorSpec(
+        status.HTTP_429_TOO_MANY_REQUESTS, "图片生成请求受限，请稍后重试或检查账户额度。",
+    ),
+    ImageGenerationTimeoutError: ErrorSpec(
+        status.HTTP_504_GATEWAY_TIMEOUT, "图片生成等待超时，请稍后重试。",
+    ),
+    ImageGenerationRejectedError: ErrorSpec(
+        status.HTTP_400_BAD_REQUEST, "图片生成请求被拒绝，请调整图片描述或检查模型支持的参数。",
+    ),
+    ImageGenerationResponseError: ErrorSpec(
+        status.HTTP_502_BAD_GATEWAY, "图片生成服务未返回有效图片，请稍后重试。",
+    ),
+    ImageGenerationStorageError: ErrorSpec(
+        status.HTTP_503_SERVICE_UNAVAILABLE, "生成图片保存或读取失败，请检查服务端本地数据目录。",
+    ),
+    ImageGenerationSchemaError: ErrorSpec(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "图片生成存储表尚未初始化，请在项目根目录执行 python -m storage.mysql --init。",
+    ),
+    ImageGenerationError: ErrorSpec(
+        status.HTTP_502_BAD_GATEWAY, "无法完成图片生成，请检查服务端网络或稍后重试。",
+    ),
+    GeneratedImageNotFoundError: ErrorSpec(
+        status.HTTP_404_NOT_FOUND, "生成图片不存在或原件已缺失。",
+    ),
     VisionConfigError: ErrorSpec(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         "请检查 .env 中的 SENSENOVA_API_KEY、SENSENOVA_BASE_URL、"
