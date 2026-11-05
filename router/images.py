@@ -19,5 +19,5 @@ async def read_generated_image(image_id: UUID, download: bool = False):
     return FileResponse(
         path, media_type=MIME_TYPES[image.file_type],
         filename=f"sensenova-{image_id}.{image.file_type}" if download else None,
-        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=86400"},
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"},
     )

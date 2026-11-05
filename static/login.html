@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f5f0">
+  <title>登录 · 知序</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/login.css">
+  <script src="/static/login.js" defer></script>
+</head>
+<body class="login-page">
+  <svg class="svg-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="auth-spark" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/></symbol>
+    <symbol id="auth-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="auth-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="auth-eye-off" viewBox="0 0 24 24"><path d="m3 3 18 18M10.5 5.1C17 4 22 12 22 12s-1.5 3-4.5 5M6.3 6.3C3.5 8.5 2 12 2 12s3.5 7 10 7c1.5 0 3-.4 4.2-1M10 10a3 3 0 0 0 4 4"/></symbol>
+    <symbol id="auth-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></symbol>
+    <symbol id="auth-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+  </svg>
+  <div class="auth-shell">
+    <aside class="auth-story" aria-label="关于知序">
+      <a class="auth-brand" href="/" aria-label="知序首页"><span class="auth-brand-mark"><svg class="icon" aria-hidden="true"><use href="#auth-spark"/></svg></span><span>知序<span class="brand-dot">.</span><small>你的思考伙伴</small></span></a>
+      <div class="auth-story-content">
+        <p class="auth-eyebrow"><span></span>给想法，一个生长的地方</p>
+        <h1>从一个问题，<br>到<span>清晰的下一步。</span></h1>
+        <p class="auth-story-description">探索新知，整理资料，让每一次思考都有迹可循。<br>属于你的对话，从这里继续。</p>
+        <div class="auth-preview" aria-hidden="true">
+          <div class="preview-heading"><span class="preview-dot"></span>一个问题，新的开始<span class="preview-number">01 / 03</span></div>
+          <div class="preview-question">帮我梳理这份资料的重点。<span>↗</span></div>
+          <div class="preview-answer"><span class="preview-spark"><svg class="icon"><use href="#auth-spark"/></svg></span><div><strong>先理清重点，再找到下一步。</strong><span class="preview-line long"></span><span class="preview-line"></span></div></div>
+          <div class="preview-tags"><span><svg class="icon"><use href="#auth-check"/></svg>整理资料</span><span>连接新知</span><span>延续思考</span></div>
+        </div>
+      </div>
+      <div class="auth-story-footer"><span>ZHIXU · THINK CLEARLY</span><span>让每个想法，更进一步</span></div>
+    </aside>
+    <main class="auth-form-side">
+      <a class="auth-mobile-brand" href="/">知序<span class="brand-dot">.</span></a>
+      <section class="auth-card" aria-labelledby="auth-title">
+        <p class="auth-workspace-label"><span></span>你的个人工作台</p>
+        <h2 id="auth-title">欢迎回来</h2>
+        <p id="auth-description" class="auth-description">登录知序，继续你的对话与探索。</p>
+        <div class="auth-tabs" role="tablist" aria-label="账号操作">
+          <button id="login-tab" type="button" role="tab" aria-selected="true" aria-controls="auth-panel" tabindex="0" data-mode="login">登录</button>
+          <button id="register-tab" type="button" role="tab" aria-selected="false" aria-controls="auth-panel" tabindex="-1" data-mode="register">注册账号</button>
+        </div>
+        <div id="auth-panel" role="tabpanel" aria-labelledby="login-tab">
+          <form id="login-form">
+            <div class="auth-field">
+              <label for="username">用户名</label>
+              <input id="username" name="username" autocomplete="username" required minlength="3" maxlength="64" pattern="[a-zA-Z0-9_.\-]{3,64}" autocapitalize="none" spellcheck="false" placeholder="输入你的用户名" aria-describedby="username-help" autofocus>
+              <p id="username-help" class="auth-field-help register-only" hidden>3–64 位字母、数字、下划线、点或短横线</p>
+            </div>
+            <div class="auth-field">
+              <label for="password">密码</label>
+              <div class="auth-password-wrap">
+                <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="128" placeholder="输入你的密码" aria-describedby="password-help">
+                <button type="button" class="auth-password-toggle" aria-label="显示密码" aria-pressed="false" aria-controls="password" data-password="password"><svg class="icon" aria-hidden="true"><use href="#auth-eye"/></svg></button>
+              </div>
+              <p id="password-help" class="auth-field-help register-only" hidden>设置 12–128 个字符的密码</p>
+            </div>
+            <div class="auth-field register-only" hidden>
+              <label for="confirm-password">确认密码</label>
+              <div class="auth-password-wrap">
+                <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" placeholder="再次输入密码" disabled>
+                <button type="button" class="auth-password-toggle" aria-label="显示确认密码" aria-pressed="false" aria-controls="confirm-password" data-password="confirm-password"><svg class="icon" aria-hidden="true"><use href="#auth-eye"/></svg></button>
+              </div>
+            </div>
+            <p id="login-error" class="auth-error" role="alert" tabindex="-1" hidden></p>
+            <button id="login-submit" type="submit" class="auth-submit"><span id="submit-label">登录</span><svg class="icon" aria-hidden="true"><use href="#auth-arrow"/></svg></button>
+          </form>
+          <p class="auth-switch"><span id="switch-description">第一次来到知序？</span><a id="switch-mode" href="#register">创建账号</a></p>
+        </div>
+        <p class="auth-privacy"><svg class="icon" aria-hidden="true"><use href="#auth-lock"/></svg>你的对话与资料，保存在自己的账号中</p>
+      </section>
+      <p class="auth-form-footer">少一点纷杂，多一点清晰。</p>
+    </main>
+  </div>
+</body>
+</html>

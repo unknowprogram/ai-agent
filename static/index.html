@@ -8,6 +8,7 @@
   <title>知序 · 智能助手</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/auth.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -44,6 +45,7 @@
       <p id="empty-history" class="empty-history">从一个问题开始，<br>你的思路会留在这里。</p>
 
       <div class="sidebar-bottom">
+        <div class="account-bar"><span id="current-user" aria-label="当前用户">正在验证登录</span><button id="logout" type="button">退出登录</button></div>
         <a href="/docs" target="_blank" rel="noopener" class="docs-link"><svg class="icon"><use href="#i-book"/></svg><span>API 接口文档</span><svg class="icon small"><use href="#i-arrow-up-right"/></svg></a>
         <div class="local-note"><span class="local-indicator"></span>会话记忆自动保存</div>
         <div class="sidebar-signature"><span>ZHIXU</span><span>你的思考伙伴</span></div>

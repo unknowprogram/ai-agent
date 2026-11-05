@@ -38,6 +38,9 @@ def save_file_data(file_id: str, raw: bytes) -> None:
 
 
 def get_file_data(file_id: str) -> bytes:
+    # 读取原件也校验归属，防止工具绕过文档元数据检查。
+    from storage.documents import get_document
+    get_document(file_id)
     try:
         with _path(file_id).open("rb") as stream:
 

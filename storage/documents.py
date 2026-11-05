@@ -1,6 +1,7 @@
 import json
 import uuid
 from storage.mysql import _transaction
+from core.identity import require_user_id
 from core.exceptions import (
      DocumentLimitError,DocumentNotFoundError
 )
@@ -37,9 +38,9 @@ def _save_document_metadata(file_id, filename, file_type, char_count, chunks, wa
         cursor.execute(
             """
             INSERT INTO documents (
-                id, filename, file_type, char_count, warnings
+                id, filename, file_type, char_count, warnings, user_id
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (
                 file_id,
@@ -47,6 +48,7 @@ def _save_document_metadata(file_id, filename, file_type, char_count, chunks, wa
                 file_type,
                 char_count,
                 json.dumps(warnings, ensure_ascii=False),
+                require_user_id(),
             ),
         )
 
@@ -96,9 +98,9 @@ def get_document(file_id: str) -> dict:
                     ''
                 ) AS preview
             FROM documents d
-            WHERE d.id = %s
+            WHERE d.id = %s AND d.user_id = %s
             """,
-            (file_id,),
+            (file_id, require_user_id()),
         )
 
         document = cursor.fetchone()
@@ -122,6 +124,8 @@ def resolve_document_ids(
         linked_ids = []
 
         if conversation_id:
+            from storage.mysql import _require_conversation
+            _require_conversation(cursor, conversation_id)
             cursor.execute(
                 """
                 SELECT document_id
@@ -153,9 +157,9 @@ def resolve_document_ids(
             f"""
             SELECT id
             FROM documents
-            WHERE id IN ({placeholders})
+            WHERE id IN ({placeholders}) AND user_id = %s
             """,
-            tuple(document_ids),
+            (*document_ids, require_user_id()),
         )
 
         found_ids = {
@@ -181,8 +185,8 @@ def get_document_metadata(document_ids: list[str]) -> list[dict]:
     placeholders = ",".join(["%s"] * len(document_ids))
     with _transaction() as conn, conn.cursor() as cursor:
         cursor.execute(
-            f"SELECT id AS file_id, filename, file_type, char_count FROM documents WHERE id IN ({placeholders}) ORDER BY id",
-            tuple(document_ids),
+            f"SELECT id AS file_id, filename, file_type, char_count FROM documents WHERE id IN ({placeholders}) AND user_id = %s ORDER BY id",
+            (*document_ids, require_user_id()),
         )
         return list(cursor.fetchall())
 
@@ -205,10 +209,10 @@ def get_document_chunks(document_ids: list[str]) -> list[dict]:
             FROM document_chunks c
             INNER JOIN documents d
                 ON d.id = c.document_id
-            WHERE d.id IN ({placeholders})
+            WHERE d.id IN ({placeholders}) AND d.user_id = %s
             ORDER BY d.id, c.chunk_index
             """,
-            tuple(document_ids),
+            (*document_ids, require_user_id()),
         )
 
         return list(cursor.fetchall())

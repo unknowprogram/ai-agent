@@ -2,15 +2,40 @@
 -- 仅创建缺失的表，保留现有表结构和数据。
 SET NAMES utf8mb4;
 
+-- 账号通过网页注册或 python -m storage.users 创建，数据库不保存明文密码。
+CREATE TABLE IF NOT EXISTS users (
+    id VARCHAR(36) NOT NULL PRIMARY KEY,
+    username VARCHAR(64) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    failed_login_count INT UNSIGNED NOT NULL DEFAULT 0,
+    locked_until DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_users_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+    token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_sessions_user (user_id),
+    KEY idx_sessions_expires (expires_at),
+    CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- ----------------------------
 -- Table structure for conversations
 -- ----------------------------
 CREATE TABLE IF NOT EXISTS `conversations`  (
   `id` varchar(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `title` varchar(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '新对话',
+  `user_id` VARCHAR(36) NULL,
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY idx_conversations_user_updated (user_id, updated_at),
+  CONSTRAINT fk_conversations_user FOREIGN KEY (user_id) REFERENCES users(id)
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
 
 -- ----------------------------
@@ -30,11 +55,14 @@ CREATE TABLE IF NOT EXISTS `messages`  (
 -- 文档元数据
 CREATE TABLE IF NOT EXISTS documents (
     id VARCHAR(36) NOT NULL PRIMARY KEY,
+    user_id VARCHAR(36) NULL,
     filename VARCHAR(255) NOT NULL,
     file_type VARCHAR(16) NOT NULL,
     char_count INT UNSIGNED NOT NULL,
     warnings TEXT NOT NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_documents_user (user_id),
+    CONSTRAINT fk_documents_user FOREIGN KEY (user_id) REFERENCES users(id)
 ) ENGINE=InnoDB
 DEFAULT CHARSET=utf8mb4
 COLLATE=utf8mb4_unicode_ci;
@@ -75,6 +103,7 @@ COLLATE=utf8mb4_unicode_ci;
 -- 生成图片与最终助手消息的关联；原件保存在 .data/generated。
 CREATE TABLE IF NOT EXISTS generated_images (
     id VARCHAR(36) NOT NULL PRIMARY KEY,
+    user_id VARCHAR(36) NULL,
     conversation_id VARCHAR(36) NOT NULL,
     message_id BIGINT NOT NULL,
     prompt TEXT NOT NULL,
@@ -87,6 +116,8 @@ CREATE TABLE IF NOT EXISTS generated_images (
     `usage` TEXT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY idx_generated_images_message (conversation_id, message_id),
+    KEY idx_images_user (user_id),
+    CONSTRAINT fk_images_user FOREIGN KEY (user_id) REFERENCES users(id),
     CONSTRAINT fk_generated_images_conversation
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
     CONSTRAINT fk_generated_images_message

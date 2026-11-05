@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pymysql
 from dotenv import load_dotenv
+from core.identity import require_user_id
 from pymysql.cursors import DictCursor
 
 from core.exceptions import (
@@ -57,8 +58,8 @@ def _transaction():
 
 
 def _require_conversation(cursor, conversation_id: str, *, lock: bool = False):
-    sql = "SELECT id, title, created_at, updated_at FROM conversations WHERE id = %s"
-    cursor.execute(sql + (" FOR UPDATE" if lock else ""), (conversation_id,))
+    sql = "SELECT id, title, created_at, updated_at FROM conversations WHERE id = %s AND user_id = %s"
+    cursor.execute(sql + (" FOR UPDATE" if lock else ""), (conversation_id, require_user_id()))
     row = cursor.fetchone()
     if row is None:
         raise ConversationNotFoundError()
@@ -73,7 +74,7 @@ def _last_message_id(cursor, conversation_id: str) -> int:
 def create_conversation(title: str = "新对话") -> str:
     conversation_id = str(uuid.uuid4())
     with _transaction() as conn, conn.cursor() as cursor:
-        cursor.execute("INSERT INTO conversations (id, title) VALUES (%s, %s)", (conversation_id, title[:200]))
+        cursor.execute("INSERT INTO conversations (id, title, user_id) VALUES (%s, %s, %s)", (conversation_id, title[:200], require_user_id()))
     return conversation_id
 
 
@@ -116,7 +117,7 @@ def save_turn(
     conversation_id = conversation_id or str(uuid.uuid4())
     with _transaction() as conn, conn.cursor() as cursor:
         if is_new:
-            cursor.execute("INSERT INTO conversations (id, title) VALUES (%s, %s)", (conversation_id, message[:200]))
+            cursor.execute("INSERT INTO conversations (id, title, user_id) VALUES (%s, %s, %s)", (conversation_id, message[:200], require_user_id()))
         else:
             _require_conversation(cursor, conversation_id, lock=True)
             if _last_message_id(cursor, conversation_id) != expected_message_id:
@@ -129,7 +130,7 @@ def save_turn(
             if len(ids) > 5:
                 raise DocumentLimitError()
             placeholders = ",".join(["%s"] * len(ids))
-            cursor.execute(f"SELECT id FROM documents WHERE id IN ({placeholders}) FOR UPDATE", tuple(sorted(ids)))
+            cursor.execute(f"SELECT id FROM documents WHERE id IN ({placeholders}) AND user_id = %s FOR UPDATE", (*sorted(ids), require_user_id()))
             if {row["id"] for row in cursor.fetchall()} != ids:
                 raise DocumentNotFoundError()
             new_ids = ids - linked
@@ -162,8 +163,8 @@ def save_turn(
 def list_conversations(limit: int = 20) -> list[dict]:
     with _transaction() as conn, conn.cursor() as cursor:
         cursor.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC, id DESC LIMIT %s",
-            (max(1, min(limit, 100)),),
+            "SELECT id, title, created_at, updated_at FROM conversations WHERE user_id = %s ORDER BY updated_at DESC, id DESC LIMIT %s",
+            (require_user_id(), max(1, min(limit, 100))),
         )
         return list(cursor.fetchall())
 

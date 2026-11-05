@@ -20,6 +20,13 @@ button:disabled { cursor: default; }
 a { color: inherit; }
 button, a, textarea { outline-offset: 4px; }
 :focus-visible { outline: 2px solid var(--accent); }
+
+/* 工作台账号栏；登录和注册布局位于 login.css。 */
+.account-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.account-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.account-bar button { flex-shrink: 0; padding: 6px 8px; font-size: 11px; border: 1px solid #d4d4c9; border-radius: 7px; background: transparent; }
+.account-bar button:hover { background: #e8e7e1; }
+.auth-startup-error { margin: 80px auto; padding: 20px; text-align: center; max-width: 500px; }
 button { transition: background .18s, color .18s, border-color .18s, transform .18s; }
 [hidden] { display: none !important; }
 .svg-defs { position: absolute; width: 0; height: 0; overflow: hidden; }

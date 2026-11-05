@@ -1,8 +1,12 @@
-(() => {
+(async () => {
   'use strict';
 
+  const auth = window.ZhixuAuth;
+  const user = await auth.ready;
+  const fetch = auth.fetch;
+
   const $ = (selector) => document.querySelector(selector);
-  const STORAGE_KEY = 'zhixu.conversations.v1';
+  const STORAGE_KEY = `zhixu.conversations.v2.${user.id}`;
   const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
   const elements = {
     form: $('#chat-form'), input: $('#message'), send: $('#send'),
@@ -883,4 +887,4 @@
   window.addEventListener('offline', checkConnection);
   restore(); renderSidebar(); renderConversation(); updateInput(); checkConnection();
   syncConversations();
-})();
+})().catch(() => { /* 登录失败或失效提示由 auth.js 统一处理。 */ });
